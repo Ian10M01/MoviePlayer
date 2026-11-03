@@ -359,6 +359,13 @@ namespace MoviePlayer.Room
                         OnPlay?.Invoke(JsonUtility.FromJson<PlayMsg>(env.payload));
                         break;
 
+                    // pause and seek carry a PlayStateMsg payload (playing=false).
+                    // Dispatch as OnPlayState so SyncEngine/PreCacheLobby can react.
+                    case "pause":
+                    case "seek":
+                        OnPlayState?.Invoke(JsonUtility.FromJson<PlayStateMsg>(env.payload));
+                        break;
+
                     case "peer_buffer":
                         OnPeerBuffer?.Invoke(JsonUtility.FromJson<BufferStatusMsg>(env.payload));
                         break;

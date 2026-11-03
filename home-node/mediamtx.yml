@@ -23,10 +23,10 @@ metricsAddress: :9998
 ###############################################################################
 
 authMethod: external
-authHTTPAddress: ${CLOUD_API_URL}/auth/hls
-# The external endpoint receives a POST with:
-#   { "user": "", "password": "", "ip": "...", "action": "read", "path": "..." }
-# and must respond with HTTP 200 to allow or 4xx to deny.
+# sync-server is the Docker Compose service name; MediaMTX POSTs JSON with
+# { "ip":…, "user":…, "password":…, "path":…, "action":…, "query":"token=CODE" }
+# server.js parses body.query to extract the room token.
+authHTTPAddress: http://sync-server:3000/auth/hls
 
 ###############################################################################
 # RTSP (internal use – packager pushes segments via RTSP if needed)

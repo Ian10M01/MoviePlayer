@@ -1,9 +1,17 @@
 'use strict';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// MoviePlayer – In-Memory Watch-Party Sync Server
-// No database, no Redis, no JWT.  Room code IS the token.
-// Max 2 peers: one host + one guest.
+// MoviePlayer – In-Memory Watch-Party Sync Server  (v2 – contract-correct)
+//
+// Wire format (both directions)
+// ──────────────────────────────
+// Every WebSocket message is a JSON "envelope":
+//   { "type": "<string>", "payload": "<JSON-string>" }
+//
+// The payload is a JSON-encoded string (not an inline object) so Unity's
+// JsonUtility.FromJson<T>(env.payload) works without an extra parse step.
+//
+// REST endpoints return snake_case to match C# [Serializable] DTOs.
 // ─────────────────────────────────────────────────────────────────────────────
 
 const express  = require('express');
@@ -15,17 +23,20 @@ const PORT = process.env.PORT || 3000;
 
 // ── In-memory state ───────────────────────────────────────────────────────────
 // rooms: Map<code, Room>
-// Room = { code, hlsUrl, hostWs, guestWs, state: { t_ms, playing, host_wall_ms } }
 const rooms = new Map();
 
 function makeCode() {
-  // 6 uppercase alphanumeric characters, easy to read aloud
+  // 6 uppercase alphanumeric characters, easy to read aloud.
   return nanoid(6).toUpperCase().replace(/[^A-Z0-9]/g, () =>
     'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'[Math.floor(Math.random() * 32)]
   ).slice(0, 6);
 }
 
-// ── Express app ───────────────────────────────────────────────────────────────
+function makeDeviceId() {
+  return nanoid(12);
+}
+
+// ── Express ───────────────────────────────────────────────────────────────────
 const app = express();
 app.use(express.json());
 
@@ -33,32 +44,36 @@ app.use(express.json());
 app.get('/health', (_req, res) => res.json({ ok: true, rooms: rooms.size }));
 
 // POST /rooms — host creates a new room
-// Body: { hlsUrl: string }  (optional; can be set later via WS)
+// Body: { hls_url?: string }
+// Returns: { room_code, room_token }  ← matches C# CreateRoomResponse
 app.post('/rooms', (req, res) => {
   const code   = makeCode();
-  const hlsUrl = (req.body && req.body.hlsUrl) || '';
+  // Accept both snake_case (hls_url) and camelCase (hlsUrl) from callers.
+  const hlsUrl = (req.body && (req.body.hls_url || req.body.hlsUrl)) || '';
   const room   = {
     code,
     hlsUrl,
-    hostWs:  null,
-    guestWs: null,
+    hostWs:        null,
+    guestWs:       null,
+    hostDeviceId:  null,
+    guestDeviceId: null,
     state: { t_ms: 0, playing: false, host_wall_ms: Date.now() },
   };
   rooms.set(code, room);
-
   console.log(`[room] created  code=${code}  hlsUrl=${hlsUrl || '(none yet)'}`);
-  res.status(201).json({ code, token: code });
+  res.status(201).json({ room_code: code, room_token: code });
 });
 
 // POST /rooms/:code/join — guest joins
+// Returns: { room_token, hls_url }  ← matches C# JoinRoomResponse
 app.post('/rooms/:code/join', (req, res) => {
   const room = rooms.get(req.params.code.toUpperCase());
   if (!room) return res.status(404).json({ error: 'Room not found' });
   console.log(`[room] join     code=${room.code}`);
-  res.json({ token: room.code, hlsUrl: room.hlsUrl });
+  res.json({ room_token: room.code, hls_url: room.hlsUrl });
 });
 
-// GET /rooms/:code — poll room state (useful for debugging)
+// GET /rooms/:code — debug / poll state
 app.get('/rooms/:code', (req, res) => {
   const room = rooms.get(req.params.code.toUpperCase());
   if (!room) return res.status(404).json({ error: 'Room not found' });
@@ -70,124 +85,252 @@ app.get('/rooms/:code', (req, res) => {
   });
 });
 
-// POST /auth/hls — MediaMTX publishUser/readUser webhook
-// MediaMTX calls this with query ?token=<code> to gate HLS access.
+// POST /auth/hls — MediaMTX external-auth webhook
+//
+// MediaMTX POSTs a JSON body with this shape:
+//   { "ip": "…", "user": "…", "password": "…", "path": "…",
+//     "protocol": "…", "id": "…", "action": "…",
+//     "query": "token=ROOMCODE" }
+//
+// The room code (= token) lives inside body.query as a URL-query string.
+// We also accept it as req.query.token or body.token for flexibility.
 app.post('/auth/hls', (req, res) => {
-  // MediaMTX sends JSON body or query param depending on config
-  const token = (req.query.token || (req.body && req.body.token) || '').toUpperCase();
-  if (!token) return res.status(403).json({ error: 'Missing token' });
-  if (rooms.has(token)) {
-    return res.status(200).json({ ok: true });
+  let token = (req.query.token || '').toUpperCase();
+
+  if (!token && req.body) {
+    if (req.body.query) {
+      // Parse "token=xxx[&…]" from the query field MediaMTX sends.
+      const m = String(req.body.query).match(/(?:^|&)token=([^&]+)/);
+      if (m) token = decodeURIComponent(m[1]).toUpperCase();
+    }
+    if (!token && req.body.token) {
+      token = String(req.body.token).toUpperCase();
+    }
   }
+
+  if (!token) return res.status(403).json({ error: 'Missing token' });
+  if (rooms.has(token)) return res.status(200).json({ ok: true });
+
   console.warn(`[auth] rejected token=${token}`);
   res.status(403).json({ error: 'Invalid token' });
 });
 
-// ── HTTP + WebSocket server ────────────────────────────────────────────────────
+// ── WebSocket helpers ─────────────────────────────────────────────────────────
+
+/**
+ * Send an envelope to a single WebSocket connection.
+ * envelope = { type, payload: JSON.stringify(payloadObj) }
+ */
+function sendEnvelope(ws, type, payloadObj) {
+  if (ws && ws.readyState === 1 /* OPEN */) {
+    ws.send(JSON.stringify({ type, payload: JSON.stringify(payloadObj) }));
+  }
+}
+
+/**
+ * Broadcast an envelope to all room peers except the sender.
+ */
+function broadcastEnvelope(room, senderWs, type, payloadObj) {
+  const raw = JSON.stringify({ type, payload: JSON.stringify(payloadObj) });
+  for (const peer of [room.hostWs, room.guestWs]) {
+    if (peer && peer !== senderWs && peer.readyState === 1) {
+      peer.send(raw);
+    }
+  }
+}
+
+/**
+ * Relay a raw message string (already an envelope) to all peers except sender.
+ * Used for play_state, play, pause, seek, rtc_offer/answer/ice, etc., where
+ * the client already sent a correctly-shaped envelope and we just forward it.
+ */
+function relay(room, senderWs, rawStr) {
+  for (const peer of [room.hostWs, room.guestWs]) {
+    if (peer && peer !== senderWs && peer.readyState === 1) {
+      peer.send(rawStr);
+    }
+  }
+}
+
+/** Safely parse a payload string (or return {} on failure). */
+function safeParsePayload(p) {
+  if (!p) return {};
+  try { return typeof p === 'string' ? JSON.parse(p) : p; }
+  catch { return {}; }
+}
+
+/**
+ * Build a RoomState-compatible object for the 'joined' envelope.
+ * Matches the C# RoomState class (room_code, device_id, host_device_id,
+ * seats[], hls_url, manifest_id, manifest, turn).
+ */
+function buildRoomState(room, myDeviceId) {
+  const seats = [];
+  if (room.hostDeviceId) {
+    seats.push({
+      device_id:    room.hostDeviceId,
+      display_name: 'Host',
+      role:         'host',
+      seat_index:   0,
+      connected:    true,
+    });
+  }
+  if (room.guestDeviceId) {
+    seats.push({
+      device_id:    room.guestDeviceId,
+      display_name: 'Guest',
+      role:         'guest',
+      seat_index:   1,
+      connected:    true,
+    });
+  }
+  return {
+    room_code:      room.code,
+    device_id:      myDeviceId,
+    host_device_id: room.hostDeviceId || myDeviceId,
+    seats,
+    hls_url:        room.hlsUrl,
+    manifest_id:    null,
+    manifest:       null,
+    turn:           null,
+  };
+}
+
+// ── HTTP + WebSocket server ───────────────────────────────────────────────────
 const server = http.createServer(app);
 const wss    = new WebSocketServer({ server, path: '/ws' });
 
 wss.on('connection', (ws, req) => {
-  const url   = new URL(req.url, `http://localhost`);
+  const url   = new URL(req.url, 'http://localhost');
   const token = (url.searchParams.get('token') || '').toUpperCase();
   const room  = rooms.get(token);
 
   if (!room) {
-    ws.send(JSON.stringify({ type: 'error', msg: 'Invalid room code' }));
+    sendEnvelope(ws, 'error', { msg: 'Invalid room code' });
     ws.close(4001, 'Invalid room code');
     return;
   }
 
-  // Assign role: first connection is host, second is guest
+  // Assign role and generate a unique device_id for this connection.
   let role;
+  const deviceId = makeDeviceId();
+
   if (!room.hostWs) {
     role = 'host';
-    room.hostWs = ws;
+    room.hostWs       = ws;
+    room.hostDeviceId = deviceId;
   } else if (!room.guestWs) {
     role = 'guest';
-    room.guestWs = ws;
+    room.guestWs       = ws;
+    room.guestDeviceId = deviceId;
   } else {
-    ws.send(JSON.stringify({ type: 'error', msg: 'Room full (max 2 peers)' }));
+    sendEnvelope(ws, 'error', { msg: 'Room full (max 2 peers)' });
     ws.close(4002, 'Room full');
     return;
   }
 
-  console.log(`[ws]  connected  code=${room.code}  role=${role}`);
-  ws.send(JSON.stringify({ type: 'welcome', role, state: room.state }));
+  console.log(`[ws]  connected    code=${room.code}  role=${role}  device=${deviceId}`);
 
-  // Notify the other peer that someone joined
-  const other = role === 'host' ? room.guestWs : room.hostWs;
-  if (other && other.readyState === 1 /* OPEN */) {
-    other.send(JSON.stringify({ type: 'peer_joined', role }));
+  // ── Send 'joined' with a full RoomState payload ───────────────────────────
+  // Matches C# RoomState and what RoomClient.DispatchMessage case "joined" expects.
+  sendEnvelope(ws, 'joined', buildRoomState(room, deviceId));
+
+  // Notify the other peer that a new peer joined.
+  const otherWs = role === 'host' ? room.guestWs : room.hostWs;
+  if (otherWs && otherWs.readyState === 1) {
+    sendEnvelope(otherWs, 'peer_joined', { device_id: deviceId, role });
   }
 
+  // ── Message handler ───────────────────────────────────────────────────────
   ws.on('message', (data) => {
+    const rawStr = data.toString();
     let msg;
-    try { msg = JSON.parse(data); } catch { return; }
+    try { msg = JSON.parse(rawStr); } catch { return; }
 
-    // ── Message handlers ────────────────────────────────────────────────────
+    // Parse the inner payload (a JSON string) into a JS object for state updates.
+    const payload = safeParsePayload(msg.payload);
+
     switch (msg.type) {
 
-      case 'play':
-        room.state.playing    = true;
-        room.state.t_ms       = msg.t_ms       ?? room.state.t_ms;
-        room.state.host_wall_ms = msg.wall_ms  ?? Date.now();
-        broadcast(room, ws, { type: 'play', t_ms: room.state.t_ms, wall_ms: room.state.host_wall_ms });
-        break;
+      // ── Playback control (host → guests) ─────────────────────────────────
+      // Update room.state for late-joiners, then relay the original envelope.
 
-      case 'pause':
+      case 'play': {
+        room.state.playing      = true;
+        room.state.t_ms         = payload.position_ms   ?? room.state.t_ms;
+        room.state.host_wall_ms = payload.wall_start_ms ?? Date.now();
+        relay(room, ws, rawStr);
+        break;
+      }
+
+      case 'pause': {
         room.state.playing = false;
-        room.state.t_ms    = msg.t_ms ?? room.state.t_ms;
-        broadcast(room, ws, { type: 'pause', t_ms: room.state.t_ms });
+        room.state.t_ms    = payload.position_ms ?? room.state.t_ms;
+        relay(room, ws, rawStr);
         break;
+      }
 
-      case 'seek':
-        room.state.t_ms    = msg.t_ms;
+      case 'seek': {
         room.state.playing = false;
-        broadcast(room, ws, { type: 'seek', t_ms: msg.t_ms });
+        room.state.t_ms    = payload.position_ms ?? room.state.t_ms;
+        relay(room, ws, rawStr);
         break;
+      }
 
-      case 'buffer':
-        // Host reports buffered ms; forward to guest for display
-        broadcast(room, ws, { type: 'buffer', buffered_ms: msg.buffered_ms, from: role });
+      // ── Buffer status (guest → host, relabelled as peer_buffer) ──────────
+      // Client sends type="buffer_status"; host receives type="peer_buffer".
+      case 'buffer_status': {
+        broadcastEnvelope(room, ws, 'peer_buffer', payload);
         break;
+      }
 
-      case 'state_request':
-        // Guest asks for current state (re-sync)
-        ws.send(JSON.stringify({ type: 'state', state: room.state }));
+      // ── State request (guest asks for current position on reconnect) ──────
+      case 'state_request': {
+        sendEnvelope(ws, 'play_state', {
+          position_ms:  room.state.t_ms,
+          playing:      room.state.playing,
+          host_wall_ms: room.state.host_wall_ms,
+        });
         break;
+      }
 
-      case 'hlsUrl':
-        // Host sets the HLS URL mid-session
-        if (role === 'host') {
-          room.hlsUrl = msg.hlsUrl;
-          broadcast(room, ws, { type: 'hlsUrl', hlsUrl: msg.hlsUrl });
-          console.log(`[room] hlsUrl set code=${room.code} url=${msg.hlsUrl}`);
+      // ── HLS URL update (host may change URL mid-session) ─────────────────
+      case 'hlsUrl': {
+        if (role === 'host' && payload.hlsUrl) {
+          room.hlsUrl = payload.hlsUrl;
+          relay(room, ws, rawStr);
+          console.log(`[room] hlsUrl set  code=${room.code}  url=${room.hlsUrl}`);
         }
         break;
+      }
 
-      case 'ping':
-        ws.send(JSON.stringify({ type: 'pong', ts: msg.ts }));
+      // ── Heartbeat ─────────────────────────────────────────────────────────
+      case 'ping': {
+        sendEnvelope(ws, 'pong', { ts: payload.ts ?? Date.now() });
         break;
+      }
 
       default:
-        // Forward unknown messages to the other peer transparently
-        broadcast(room, ws, msg);
+        // Relay all other enveloped messages transparently:
+        //   play_state, rtc_offer, rtc_answer, rtc_ice, etc.
+        // VoiceChat.cs filters rtc_* by to_device_id on the client side.
+        relay(room, ws, rawStr);
     }
   });
 
+  // ── Disconnect ─────────────────────────────────────────────────────────────
   ws.on('close', () => {
-    if (room.hostWs  === ws) room.hostWs  = null;
-    if (room.guestWs === ws) room.guestWs = null;
-    console.log(`[ws]  disconnected  code=${room.code}  role=${role}`);
+    if (room.hostWs  === ws) { room.hostWs  = null; room.hostDeviceId  = null; }
+    if (room.guestWs === ws) { room.guestWs = null; room.guestDeviceId = null; }
+    console.log(`[ws]  disconnected  code=${room.code}  role=${role}  device=${deviceId}`);
 
-    // Notify the remaining peer
     const remaining = room.hostWs || room.guestWs;
     if (remaining && remaining.readyState === 1) {
-      remaining.send(JSON.stringify({ type: 'peer_left', role }));
+      // device_id from closure — correctly identifies the peer that left.
+      sendEnvelope(remaining, 'peer_left', { device_id: deviceId });
     }
 
-    // Clean up empty rooms after 5 minutes
+    // Clean up empty rooms after 5 minutes.
     if (!room.hostWs && !room.guestWs) {
       setTimeout(() => {
         if (!room.hostWs && !room.guestWs) {
@@ -203,19 +346,11 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-function broadcast(room, senderWs, payload) {
-  const msg = JSON.stringify(payload);
-  for (const peer of [room.hostWs, room.guestWs]) {
-    if (peer && peer !== senderWs && peer.readyState === 1 /* OPEN */) {
-      peer.send(msg);
-    }
-  }
-}
-
 // ── Start ─────────────────────────────────────────────────────────────────────
 server.listen(PORT, () => {
   console.log(`\n🎬 MoviePlayer Sync Server running on :${PORT}`);
-  console.log(`   POST /rooms        → create room (returns { code, token })`);
-  console.log(`   POST /rooms/:code/join → guest joins`);
-  console.log(`   WS   /ws?token=CODE → real-time sync\n`);
+  console.log(`   POST /rooms            → create room → { room_code, room_token }`);
+  console.log(`   POST /rooms/:code/join → guest join  → { room_token, hls_url }`);
+  console.log(`   POST /auth/hls         → MediaMTX auth webhook`);
+  console.log(`   WS   /ws?token=CODE   → real-time sync\n`);
 });

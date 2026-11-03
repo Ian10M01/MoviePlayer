@@ -40,8 +40,9 @@ CLARITY_PACK_DIR=C:/Users/YourName/ClarityPacks
 ```
 Save and close.
 
-### 4. Build the ExoPlayer AAR (once)
-The Quest app needs a small Android library to play HLS video.
+### 4. Build the ExoPlayer AAR (once — **must be done before step 5**)
+The Quest app needs a small Android library to play HLS video.  
+**The Unity APK cannot be built until this AAR exists.**
 
 **Option A – Pre-built AAR provided (easiest)**  
 If `quest-app/Assets/Plugins/Android/ExoPlayerPlugin.aar` already exists, skip to step 5.
@@ -51,11 +52,20 @@ See `quest-app/ExoPlayerPlugin/BUILD_INSTRUCTIONS.md` for the 5-step process.
 Takes about 3 minutes.
 
 ### 5. Build and sideload the Unity APK
-See `quest-app/README.md` for Unity build instructions.  
-Sideload to **both** Quest headsets:
+See `quest-app/README.md` for Unity build instructions.
+
+Sideload to **both** Quest headsets — pick whichever method you prefer:
+
+**Option A – Command line (ADB)**
 ```powershell
 adb install -r MoviePlayer.apk
 ```
+> Both Quests must be in **Developer Mode** and connected via USB.  
+> To enable Developer Mode: [Meta's developer setup guide](https://developer.oculus.com/documentation/native/android/mobile-device-setup/).
+
+**Option B – SideQuest (GUI, no command line)**  
+Download [SideQuest Desktop](https://sidequestvr.com/setup-howto) (free), connect your Quest via USB, drag-and-drop the APK, and click **Install**.  
+Developer Mode still required.
 
 ---
 

@@ -140,6 +140,10 @@ namespace MoviePlayer.Room
             if (!msg.playing)
             {
                 Player?.Pause();
+                // Seek to the exact position so a host pause/seek lands the
+                // guest at the correct frame, not just wherever they happened
+                // to be (SyncEngine's Update loop early-exits when paused).
+                Player?.SeekTo(msg.position_ms);
                 SetRate(1.0f);
             }
             else

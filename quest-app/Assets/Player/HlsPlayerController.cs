@@ -175,19 +175,10 @@ namespace MoviePlayer.Player
         public void SetPlaybackRate(float rate)
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
-            AndroidJNI.AttachCurrentThread();
-            try
-            {
-                using var paramsClass = new AndroidJavaClass(
-                    "com.google.android.exoplayer2.PlaybackParameters");
-                using var playbackParams = new AndroidJavaObject(
-                    "com.google.android.exoplayer2.PlaybackParameters", rate);
-                _exoPlayer?.Call("setPlaybackParameters", playbackParams);
-            }
-            catch (Exception e)
-            {
-                Debug.LogWarning($"[HlsPlayerController] SetPlaybackRate failed: {e.Message}");
-            }
+            // ExoPlayerHelper exposes setPlaybackRate(float) directly (uses media3
+            // PlaybackParameters internally).  The old exoplayer2 package path no
+            // longer exists in media3 and would throw a JNI ClassNotFoundException.
+            CallExoPlayer("setPlaybackRate", rate);
 #else
             Debug.Log($"[HlsPlayerController] SetPlaybackRate({rate})");
 #endif
