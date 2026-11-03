@@ -1,0 +1,96 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# MediaMTX configuration – MoviePlayer VR Cinema Home Node
+# ─────────────────────────────────────────────────────────────────────────────
+
+###############################################################################
+# Global settings
+###############################################################################
+
+# Log level: debug | info | warn | error
+logLevel: info
+logDestinations: [stdout]
+
+# Metrics / API
+api: yes
+apiAddress: :9997
+metrics: yes
+metricsAddress: :9998
+
+###############################################################################
+# Authentication
+# Delegates auth decisions to the cloud API so the headset JWT is validated
+# server-side without storing credentials on the home node.
+###############################################################################
+
+authMethod: external
+authHTTPAddress: ${CLOUD_API_URL}/auth/hls
+# The external endpoint receives a POST with:
+#   { "user": "", "password": "", "ip": "...", "action": "read", "path": "..." }
+# and must respond with HTTP 200 to allow or 4xx to deny.
+
+###############################################################################
+# RTSP (internal use – packager pushes segments via RTSP if needed)
+###############################################################################
+
+rtsp: yes
+rtspAddress: :8554
+rtspsAddress: :8322
+rtpAddress: :8000
+rtcpAddress: :8001
+
+# Encryption disabled for internal network
+rtspEncryption: no
+
+###############################################################################
+# HLS (primary delivery to Quest headsets)
+###############################################################################
+
+hls: yes
+hlsAddress: :8888
+hlsEncryption: no
+hlsAlwaysRemux: no
+hlsVariant: fmp4
+hlsSegmentCount: 7
+hlsSegmentDuration: 2s
+hlsPartDuration: 200ms
+hlsSegmentMaxSize: 50MB
+hlsAllowOrigin: "*"
+hlsDirectory: /hls
+
+# Serve HLS segments from disk (packager writes segments here)
+hlsTrustedProxies: []
+
+###############################################################################
+# WebRTC (disabled – Quest uses HLS)
+###############################################################################
+
+webrtc: no
+
+###############################################################################
+# SRT (disabled)
+###############################################################################
+
+srt: no
+
+###############################################################################
+# Path defaults
+###############################################################################
+
+pathDefaults:
+  # Allow any publisher on the internal Docker network
+  publishIPs: []
+  readIPs: []
+  readUser:
+  readPass:
+
+###############################################################################
+# Named paths – one per streamed movie (dynamically managed by packager)
+# The packager registers paths via the MediaMTX API at runtime.
+# A wildcard path catches all movie IDs.
+###############################################################################
+
+paths:
+  "~^hls/":
+    source: publisher
+    # Packager pushes fmp4 segments; MediaMTX serves them as HLS
+    hlsSegmentDuration: 2s

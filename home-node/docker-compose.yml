@@ -1,0 +1,106 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MoviePlayer VR Cinema – Home Node
+# ─────────────────────────────────────────────────────────────────────────────
+# Required .env keys:
+#   CLOUDFLARE_TUNNEL_TOKEN   – Cloudflare Zero Trust tunnel token
+#   CLOUD_API_URL             – Base URL of the cloud relay (e.g. https://api.example.com)
+#   MEDIA_DIR                 – Absolute host path to your movies folder
+#   CLARITY_PACK_DIR          – Absolute host path where clarity packs are written
+#   API_SECRET                – Shared secret between packager API and cloud relay
+# ─────────────────────────────────────────────────────────────────────────────
+
+networks:
+  cinema:
+    driver: bridge
+
+services:
+
+  # ── Packager ───────────────────────────────────────────────────────────────
+  packager:
+    build:
+      context: ./packager
+      dockerfile: Dockerfile
+    container_name: cinema-packager
+    restart: unless-stopped
+    environment:
+      MEDIA_DIR: /media
+      CLARITY_PACK_DIR: /clarity
+      CLOUD_API_URL: ${CLOUD_API_URL}
+      API_SECRET: ${API_SECRET}
+      MEDIAMTX_URL: http://mediamtx:9997
+    volumes:
+      - ${MEDIA_DIR}:/media
+      - ${CLARITY_PACK_DIR}:/clarity
+      - hls_segments:/hls
+    ports:
+      - "8080:8080"
+    networks:
+      - cinema
+    depends_on:
+      - mediamtx
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Clarity Worker ─────────────────────────────────────────────────────────
+  clarity-worker:
+    build:
+      context: ./clarity-worker
+      dockerfile: Dockerfile
+    container_name: cinema-clarity-worker
+    restart: unless-stopped
+    environment:
+      MEDIA_DIR: /media
+      CLARITY_PACK_DIR: /clarity
+      FAST_MODE: ${CLARITY_FAST_MODE:-0}
+    volumes:
+      - ${MEDIA_DIR}:/media
+      - ${CLARITY_PACK_DIR}:/clarity
+    networks:
+      - cinema
+    # GPU passthrough – ignored silently if no NVIDIA runtime is present
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ── MediaMTX (HLS + RTSP server) ──────────────────────────────────────────
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: cinema-mediamtx
+    restart: unless-stopped
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+      - hls_segments:/hls
+    ports:
+      - "8888:8888"   # HLS
+      - "8554:8554"   # RTSP
+      - "9997:9997"   # API
+    networks:
+      - cinema
+    environment:
+      MTX_PATHS_ALL_SOURCE: publisher
+
+  # ── Cloudflared Tunnel ─────────────────────────────────────────────────────
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: cinema-cloudflared
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run
+    environment:
+      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    networks:
+      - cinema
+    depends_on:
+      - packager
+      - mediamtx
+
+volumes:
+  hls_segments:
