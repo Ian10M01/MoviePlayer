@@ -1,0 +1,23 @@
+{
+  "dependencies": {
+    "com.unity.xr.openxr": "1.10.0",
+    "com.unity.xr.oculus": "4.2.0",
+    "com.unity.webrtc": "3.0.0-pre.8",
+    "com.unity.nuget.newtonsoft-json": "3.2.1",
+    "com.unity.render-pipelines.universal": "17.0.3",
+    "com.unity.inputsystem": "1.8.2",
+    "com.unity.textmeshpro": "3.0.9",
+    "com.unity.ugui": "2.0.0",
+    "com.unity.xr.management": "4.4.1",
+    "com.endel.nativewebsocket": "https://github.com/endel/NativeWebSocket.git#upm"
+  },
+  "scopedRegistries": [
+    {
+      "name": "Unity Technologies",
+      "url": "https://package.registry.unity.com",
+      "scopes": [
+        "com.unity"
+      ]
+    }
+  ]
+}
