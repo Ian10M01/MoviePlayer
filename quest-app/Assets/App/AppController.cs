@@ -78,6 +78,9 @@ namespace MoviePlayer.App
         {
             _homeNodeUrl = PlayerPrefs.GetString("homeNodeUrl", string.Empty);
             _authToken   = PlayerPrefs.GetString("authToken",   string.Empty);
+            // Override inspector URL defaults with any saved values (fallback = inspector field)
+            CloudApiUrl = PlayerPrefs.GetString("ApiUrl", CloudApiUrl);
+            CloudWsUrl  = PlayerPrefs.GetString("WsUrl",  CloudWsUrl);
 
             // Wire UI buttons
             if (SaveSetupButton != null) SaveSetupButton.onClick.AddListener(OnSaveSetup);
@@ -312,20 +315,28 @@ namespace MoviePlayer.App
 
             ShowPanel(WatchingPanel);
 
-            // Connect WebSocket; manifest arrives in the 'joined' message
+            // Start HLS playback using URL from join response (play_state syncs via 'joined' WS message)
+            if (!string.IsNullOrEmpty(resp.hls_url))
+                PlayerController?.Initialize(resp.hls_url, _authToken);
+
+            // Connect WebSocket; 'joined' message carries current play_state for sync
             RoomClient?.ConnectAsync($"{CloudWsUrl}", _authToken);
         }
 
         private void OnRoomJoined(RoomState state)
         {
-            if (state.manifest != null)
-            {
-                ScreenRenderer?.ApplyManifest(state.manifest);
-                string hlsUrl = $"{_homeNodeUrl}{state.manifest.hls_path}";
-                PlayerController?.Initialize(hlsUrl, _authToken);
-            }
+            // Display room code (available for both host and guest)
+            if (!string.IsNullOrEmpty(state.room_code))
+                LobbyUI?.SetRoomCode(state.room_code);
 
-            LobbyUI?.SetRoomCode(state.room_code);
+            // Sync player to room's current play position
+            if (state.play_state != null && PlayerController != null)
+            {
+                if (state.play_state.position_ms > 0)
+                    PlayerController.SeekTo(state.play_state.position_ms);
+                if (state.play_state.playing)
+                    PlayerController.Play();
+            }
         }
 
         #endregion
@@ -374,9 +385,8 @@ namespace MoviePlayer.App
         // ─────────────────────────────────────────────────────────────────────
         // Local DTO types for Unity JSON serialization (JsonUtility needs plain types)
 
-        [Serializable] private class LibraryResponse    { public MediaManifest[] items; }
-        [Serializable] private class CreateRoomRequest  { public string manifest_id; public string hls_url; }
-        [Serializable] private class CreateRoomResponse { public string room_code; public string room_token; }
-        [Serializable] private class JoinRoomResponse   { public string room_token; }
+        [Serializable] private class LibraryResponse   { public MediaManifest[] items; }
+        [Serializable] private class CreateRoomRequest { public string manifest_id; public string hls_url; }
+        // CreateRoomResponse and JoinRoomResponse are defined in MoviePlayer.Proto.RoomMessages
     }
 }

@@ -38,8 +38,9 @@ namespace MoviePlayer.Room
         public event Action<RoomState>       OnJoined;
         public event Action<PlayStateMsg>    OnPlayState;
         public event Action<PlayMsg>         OnPlay;
-        public event Action<BufferStatusMsg> OnPeerBuffer;
+        public event Action<PeerBufferMsg>   OnPeerBuffer;
         public event Action<string>          OnPeerLeft;
+        public event Action<PeerJoinedMsg>   OnPeerJoined;
         // WebRTC signaling
         public event Action<RtcOfferMsg>     OnRtcOffer;
         public event Action<RtcAnswerMsg>    OnRtcAnswer;
@@ -136,9 +137,8 @@ namespace MoviePlayer.Room
         {
             var msg = new BufferStatusMsg
             {
-                device_id        = DeviceId,
-                buffered_seconds = bufferedSeconds,
-                ready            = ready
+                buffered_s = bufferedSeconds,
+                ready      = ready
             };
             Send("buffer_status", JsonUtility.ToJson(msg));
         }
@@ -367,11 +367,15 @@ namespace MoviePlayer.Room
                         break;
 
                     case "peer_buffer":
-                        OnPeerBuffer?.Invoke(JsonUtility.FromJson<BufferStatusMsg>(env.payload));
+                        OnPeerBuffer?.Invoke(JsonUtility.FromJson<PeerBufferMsg>(env.payload));
                         break;
 
                     case "peer_left":
                         OnPeerLeft?.Invoke(JsonUtility.FromJson<PeerLeftMsg>(env.payload).device_id);
+                        break;
+
+                    case "peer_joined":
+                        OnPeerJoined?.Invoke(JsonUtility.FromJson<PeerJoinedMsg>(env.payload));
                         break;
 
                     case "rtc_offer":

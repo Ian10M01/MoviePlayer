@@ -202,7 +202,7 @@ namespace MoviePlayer.Room
                         : status.display_name;
 
                 // Smooth progress ring animation
-                float targetFill = Mathf.Clamp01(status.buffered_seconds / TargetBufferSeconds);
+                float targetFill = Mathf.Clamp01(status.buffered_s / TargetBufferSeconds);
                 row.DisplayedFill = Mathf.Lerp(row.DisplayedFill, targetFill, Time.deltaTime * 4f);
                 if (row.ProgressRing != null)
                     row.ProgressRing.fillAmount = row.DisplayedFill;

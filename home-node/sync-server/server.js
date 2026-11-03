@@ -57,11 +57,11 @@ app.post('/rooms', (req, res) => {
     guestWs:       null,
     hostDeviceId:  null,
     guestDeviceId: null,
-    state: { t_ms: 0, playing: false, host_wall_ms: Date.now() },
+    state: { position_ms: 0, playing: false, wall_start_ms: Date.now() },
   };
   rooms.set(code, room);
   console.log(`[room] created  code=${code}  hlsUrl=${hlsUrl || '(none yet)'}`);
-  res.status(201).json({ room_code: code, room_token: code });
+  res.status(201).json({ room_code: code, room_token: code, hls_url: hlsUrl });
 });
 
 // POST /rooms/:code/join — guest joins
@@ -70,7 +70,7 @@ app.post('/rooms/:code/join', (req, res) => {
   const room = rooms.get(req.params.code.toUpperCase());
   if (!room) return res.status(404).json({ error: 'Room not found' });
   console.log(`[room] join     code=${room.code}`);
-  res.json({ room_token: room.code, hls_url: room.hlsUrl });
+  res.json({ room_token: room.code, hls_url: room.hlsUrl, media_id: '', media_name: '' });
 });
 
 // GET /rooms/:code — debug / poll state
@@ -191,7 +191,11 @@ function buildRoomState(room, myDeviceId) {
     seats,
     hls_url:        room.hlsUrl,
     manifest_id:    null,
-    manifest:       null,
+    play_state: {
+      position_ms:   room.state.position_ms,
+      playing:       room.state.playing,
+      wall_start_ms: room.state.wall_start_ms,
+    },
     turn:           null,
   };
 }
@@ -256,40 +260,46 @@ wss.on('connection', (ws, req) => {
       // Update room.state for late-joiners, then relay the original envelope.
 
       case 'play': {
-        room.state.playing      = true;
-        room.state.t_ms         = payload.position_ms   ?? room.state.t_ms;
-        room.state.host_wall_ms = payload.wall_start_ms ?? Date.now();
+        room.state.playing       = true;
+        room.state.position_ms   = payload.position_ms  ?? room.state.position_ms;
+        room.state.wall_start_ms = payload.wall_start_ms ?? Date.now();
         relay(room, ws, rawStr);
         break;
       }
 
       case 'pause': {
-        room.state.playing = false;
-        room.state.t_ms    = payload.position_ms ?? room.state.t_ms;
+        room.state.playing     = false;
+        room.state.position_ms = payload.position_ms ?? room.state.position_ms;
         relay(room, ws, rawStr);
         break;
       }
 
       case 'seek': {
-        room.state.playing = false;
-        room.state.t_ms    = payload.position_ms ?? room.state.t_ms;
+        room.state.playing     = false;
+        room.state.position_ms = payload.position_ms ?? room.state.position_ms;
         relay(room, ws, rawStr);
         break;
       }
 
       // ── Buffer status (guest → host, relabelled as peer_buffer) ──────────
-      // Client sends type="buffer_status"; host receives type="peer_buffer".
+      // Client sends type="buffer_status" (BufferStatusMsg: buffered_s, ready).
+      // Server injects device_id and re-broadcasts as type="peer_buffer" (PeerBufferMsg).
       case 'buffer_status': {
-        broadcastEnvelope(room, ws, 'peer_buffer', payload);
+        broadcastEnvelope(room, ws, 'peer_buffer', {
+          device_id:  deviceId,
+          buffered_s: payload.buffered_s ?? 0,
+          ready:      payload.ready      ?? false,
+        });
         break;
       }
 
       // ── State request (guest asks for current position on reconnect) ──────
       case 'state_request': {
+        // Response uses PlayStateMsg format (host_wall_ms field name for SyncEngine compat)
         sendEnvelope(ws, 'play_state', {
-          position_ms:  room.state.t_ms,
+          position_ms:  room.state.position_ms,
           playing:      room.state.playing,
-          host_wall_ms: room.state.host_wall_ms,
+          host_wall_ms: room.state.wall_start_ms,
         });
         break;
       }
@@ -350,7 +360,7 @@ wss.on('connection', (ws, req) => {
 server.listen(PORT, () => {
   console.log(`\n🎬 MoviePlayer Sync Server running on :${PORT}`);
   console.log(`   POST /rooms            → create room → { room_code, room_token }`);
-  console.log(`   POST /rooms/:code/join → guest join  → { room_token, hls_url }`);
+  console.log(`   POST /rooms/:code/join → guest join  → { room_token, hls_url, media_id, media_name }`);
   console.log(`   POST /auth/hls         → MediaMTX auth webhook`);
   console.log(`   WS   /ws?token=CODE   → real-time sync\n`);
 });

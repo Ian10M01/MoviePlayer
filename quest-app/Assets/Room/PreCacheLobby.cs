@@ -193,7 +193,7 @@ namespace MoviePlayer.Room
             }
         }
 
-        private void HandlePeerBuffer(BufferStatusMsg msg)
+        private void HandlePeerBuffer(PeerBufferMsg msg)
         {
             if (!_peerStatuses.TryGetValue(msg.device_id, out var status))
             {
@@ -201,11 +201,11 @@ namespace MoviePlayer.Room
                 _peerStatuses[msg.device_id] = status;
             }
 
-            status.buffered_seconds  = msg.buffered_seconds;
-            status.ready             = msg.ready;
-            status.last_update_time  = Time.realtimeSinceStartup;
+            status.buffered_s       = msg.buffered_s;
+            status.ready            = msg.ready;
+            status.last_update_time = Time.realtimeSinceStartup;
 
-            Debug.Log($"[PreCacheLobby] Peer {msg.device_id}: {msg.buffered_seconds:F1}s buffered, ready={msg.ready}");
+            Debug.Log($"[PreCacheLobby] Peer {msg.device_id}: {msg.buffered_s:F1}s buffered, ready={msg.ready}");
         }
 
         private void HandlePeerLeft(string deviceId)
