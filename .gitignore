@@ -1,0 +1,27 @@
+# Unity / Android build output
+quest-app/Library/
+quest-app/Temp/
+quest-app/Logs/
+quest-app/UserSettings/
+quest-app/obj/
+quest-app/Build/
+quest-app/.utmp/
+quest-app/.vs/
+quest-app/.gradle/
+quest-app/**/build/
+quest-app/**/.gradle/
+
+# Local editor and license logs
+*.log
+*.log.err
+*.alf
+license_request.log
+
+# Generated IDE / machine-local Android SDK path
+*.csproj
+*.slnx
+quest-app/ExoPlayerPlugin/local.properties
+
+# OS
+Thumbs.db
+.DS_Store

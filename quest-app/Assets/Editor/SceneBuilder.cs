@@ -61,7 +61,7 @@ public static class SceneBuilder
         SetSerializedField(app.GetComponent<ClarityStack>(),         "ClarityMaterial",  clarityMat);
 
         // 6 ── World-space Canvas  (2 m in front of camera)
-        var canvasRoot = CreateWorldCanvas();
+        var canvasRoot = CreateWorldCanvas(mainCamGO.GetComponent<Camera>());
         canvasRoot.transform.position = new Vector3(0, 1.5f, 2f);
 
         // 7 ── UI panels + widgets, returns a bag of named GOs/components
@@ -161,6 +161,7 @@ public static class SceneBuilder
         SafeAdd<HlsPlayerController>(app);
         SafeAdd<TheaterEnvironment>(app);
         SafeAdd<RoomClient>(app);
+        SafeAdd<SyncEngine>(app);
         SafeAdd<PreCacheLobby>(app);
         SafeAdd<VoiceChat>(app);
         SafeAdd<LobbyUI>(app);
@@ -195,25 +196,29 @@ public static class SceneBuilder
 
     // ─── World-space Canvas ──────────────────────────────────────────────────
 
-    static GameObject CreateWorldCanvas()
+    static GameObject CreateWorldCanvas(Camera eventCamera)
     {
         var canvasGO = new GameObject("UI");
 
         var canvas = canvasGO.AddComponent<Canvas>();
-        canvas.renderMode      = RenderMode.WorldSpace;
-        canvas.worldCamera     = null; // set at runtime by GazeClick if needed
-        canvas.sortingOrder    = 0;
+        canvas.renderMode   = RenderMode.WorldSpace;
+        canvas.worldCamera  = eventCamera;
+        canvas.sortingOrder = 0;
 
+        // 1600×1200 px at 0.001 scale = 1.6 m × 1.2 m in front of the user.
+        // Widget positions are in this pixel space (hundreds of px), so the
+        // rect must be pixel-sized or the controls land hundreds of metres away.
         var rt = canvasGO.GetComponent<RectTransform>();
-        rt.sizeDelta = new Vector2(1.6f, 1.2f);
-        rt.localScale = Vector3.one;
+        rt.sizeDelta  = new Vector2(1600f, 1200f);
+        rt.localScale = new Vector3(0.001f, 0.001f, 0.001f);
 
         var scaler = canvasGO.AddComponent<CanvasScaler>();
-        scaler.uiScaleMode         = CanvasScaler.ScaleMode.ScaleWithScreenSize;
-        scaler.referenceResolution = new Vector2(1920, 1080);
-        scaler.scaleFactor         = 0.001f;   // world-space units per pixel
+        scaler.uiScaleMode         = CanvasScaler.ScaleMode.ConstantPixelSize;
+        scaler.scaleFactor         = 1f;
+        scaler.dynamicPixelsPerUnit = 10f;
 
         canvasGO.AddComponent<GraphicRaycaster>();
+        canvasGO.AddComponent<UiFontBootstrap>();
 
         return canvasGO;
     }
@@ -373,6 +378,7 @@ public static class SceneBuilder
         var sc  = app.GetComponent<StereoScreenRenderer>();
         var cs  = app.GetComponent<ClarityStack>();
         var hls = app.GetComponent<HlsPlayerController>();
+        var se  = app.GetComponent<SyncEngine>();
         var te  = app.GetComponent<TheaterEnvironment>();
         var rc  = app.GetComponent<RoomClient>();
         var pcl = app.GetComponent<PreCacheLobby>();
@@ -423,6 +429,9 @@ public static class SceneBuilder
 
         // HlsPlayerController ← screen renderer (for RenderTexture assignment)
         SetSerializedField(hls, "ScreenRenderer", sc);
+
+        // SyncEngine ← player
+        SetSerializedField(se, "Player", hls);
 
         Debug.Log("[SceneBuilder] All component references wired.");
     }

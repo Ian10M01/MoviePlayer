@@ -22,7 +22,7 @@ metricsAddress: :9998
 # server-side without storing credentials on the home node.
 ###############################################################################
 
-authMethod: external
+authMethod: http
 # sync-server is the Docker Compose service name; MediaMTX POSTs JSON with
 # { "ip":…, "user":…, "password":…, "path":…, "action":…, "query":"token=CODE" }
 # server.js parses body.query to extract the room token.
@@ -38,9 +38,6 @@ rtspsAddress: :8322
 rtpAddress: :8000
 rtcpAddress: :8001
 
-# Encryption disabled for internal network
-rtspEncryption: no
-
 ###############################################################################
 # HLS (primary delivery to Quest headsets)
 ###############################################################################
@@ -53,7 +50,7 @@ hlsVariant: fmp4
 hlsSegmentCount: 7
 hlsSegmentDuration: 2s
 hlsPartDuration: 200ms
-hlsSegmentMaxSize: 50MB
+hlsSegmentMaxSize: 50M
 hlsAllowOrigin: "*"
 hlsDirectory: /hls
 
@@ -77,11 +74,7 @@ srt: no
 ###############################################################################
 
 pathDefaults:
-  # Allow any publisher on the internal Docker network
-  publishIPs: []
-  readIPs: []
-  readUser:
-  readPass:
+  source: publisher
 
 ###############################################################################
 # Named paths – one per streamed movie (dynamically managed by packager)
@@ -92,5 +85,3 @@ pathDefaults:
 paths:
   "~^hls/":
     source: publisher
-    # Packager pushes fmp4 segments; MediaMTX serves them as HLS
-    hlsSegmentDuration: 2s

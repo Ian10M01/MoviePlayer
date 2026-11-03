@@ -105,30 +105,30 @@ def _build_ffmpeg_hls_cmd(
     compat: dict[str, Any],
 ) -> list[str]:
     """
-    Build the FFmpeg command that produces fmp4 HLS segments.
-    Uses HEVC copy if source is already HEVC-compatible; otherwise transcodes.
+    Build the FFmpeg command that produces H.264/AAC fMP4 VOD HLS.
+    Copies an existing H.264 or AAC stream; otherwise transcodes to
+    libx264 High + AAC so Quest MediaPlayer can play the playlist.
     """
-    codec = manifest.get("codec", "")
-    compat_action = compat.get("compat_action", "transcode")
+    codec = (manifest.get("codec") or "").lower()
+    _ = compat  # retained for callers; output is always H.264/AAC
 
-    # Determine video encoding
-    if codec in ("hevc", "h265") and compat_action in ("native", "remux"):
-        video_args = ["-c:v", "copy"]
-    elif codec in ("h264", "avc") and compat_action == "native":
-        video_args = ["-c:v", "copy"]
+    if codec in ("h264", "avc"):
+        video_args = ["-c:v", "copy", "-tag:v", "avc1"]
     else:
-        # Transcode to HEVC Main10, targeting ~15 Mbps for typical VR content
         video_args = [
-            "-c:v", "libx265",
-            "-preset", "medium",
-            "-crf", "22",
-            "-tag:v", "hvc1",
-            "-pix_fmt", "yuv420p10le",
-            "-x265-params", "log-level=error",
+            "-c:v", "libx264",
+            "-preset", "fast",
+            "-crf", "20",
+            "-profile:v", "high",
+            "-pix_fmt", "yuv420p",
+            "-tag:v", "avc1",
         ]
 
-    # Audio: passthrough if AAC/EAC3/AC3; convert others to AAC
-    audio_args = ["-c:a", "copy"]
+    tracks = manifest.get("audio_tracks") or []
+    audio_is_aac = bool(tracks) and all(
+        (t.get("codec") or "").lower() in ("aac", "mp4a") for t in tracks
+    )
+    audio_args = ["-c:a", "copy"] if audio_is_aac else ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
 
     index_path = str(hls_dir / "index.m3u8")
     segment_pattern = str(hls_dir / "seg%05d.m4s")

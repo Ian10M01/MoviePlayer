@@ -98,6 +98,25 @@ public static class XRSetup
         EditorUtility.SetDirty(androidSettings);
         if (androidSettings.Manager != null)
             EditorUtility.SetDirty(androidSettings.Manager);
+
+        // Quest only starts OpenXR when these settings are in the player preload list.
+        EnsurePreloadedAssets(androidSettings);
+    }
+
+    static void EnsurePreloadedAssets(XRGeneralSettings androidSettings)
+    {
+        var list = new System.Collections.Generic.List<UnityEngine.Object>();
+        if (androidSettings != null)
+            list.Add(androidSettings);
+
+        const string settingsAssetPath = "Assets/XR/Settings/OpenXR Package Settings.asset";
+        var androidOpenXr = AssetDatabase.LoadAllAssetsAtPath(settingsAssetPath)
+            .FirstOrDefault(s => s != null && s.name == "Android");
+        if (androidOpenXr != null)
+            list.Add(androidOpenXr);
+
+        PlayerSettings.SetPreloadedAssets(list.ToArray());
+        Debug.Log($"[XRSetup] Preloaded XR assets: {list.Count}");
     }
 
     // ─── 2. Enable OpenXR features ───────────────────────────────────────────

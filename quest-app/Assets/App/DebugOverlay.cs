@@ -25,11 +25,12 @@ namespace MoviePlayer.App
         private void Awake()
         {
             _label = GetComponentInChildren<TextMeshProUGUI>(true);
+            // Subscribe before other Start() calls so "[App] Started" is captured.
+            Application.logMessageReceived += OnLog;
         }
 
         private void Start()
         {
-            Application.logMessageReceived += OnLog;
             OnLog("[App] Scene started", null, LogType.Log);
         }
 
