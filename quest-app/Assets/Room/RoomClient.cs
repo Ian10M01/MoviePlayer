@@ -319,7 +319,7 @@ namespace MoviePlayer.Room
             var data = Encoding.UTF8.GetBytes(json);
 
 #if !UNITY_EDITOR && UNITY_ANDROID
-            _ = _ws.SendBytes(data);
+            _ = _ws.Send(data);
 #else
             if (_ws?.State == System.Net.WebSockets.WebSocketState.Open)
             {

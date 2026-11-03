@@ -1,31 +1,23 @@
+// Unity.WebRTC (com.unity.webrtc) is deprecated for Unity 6000.x.
+// All WebRTC-specific code is guarded with #if UNITY_WEBRTC_AVAILABLE.
+// To enable real voice chat, install a compatible WebRTC package and
+// add UNITY_WEBRTC_AVAILABLE to Project Settings → Scripting Define Symbols.
 using System;
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.Audio;
-using Unity.WebRTC;
 using MoviePlayer.Proto;
+
+#if UNITY_WEBRTC_AVAILABLE
+using Unity.WebRTC;
+#endif
 
 namespace MoviePlayer.Room
 {
     /// <summary>
     /// WebRTC mesh voice chat for ≤4 participants.
-    ///
-    /// Mic input
-    /// ─────────
-    /// A Unity Microphone.Start() AudioClip is fed into an AudioStreamTrack.
-    /// Push-to-talk: Space / controller primary trigger gates the track.
-    /// VAD gate: simple RMS threshold (±15ms window) when PTT is off.
-    ///
-    /// Movie ducking
-    /// ─────────────
-    /// When any remote peer is speaking above DuckThresholdRms the HLS player
-    /// volume is reduced to DuckedVolume via HlsPlayerController.SetVolume().
-    ///
-    /// Signaling
-    /// ─────────
-    /// Offer/answer/ICE is sent over the existing RoomClient WebSocket as
-    /// JSON messages of types rtc_offer / rtc_answer / rtc_ice.
+    /// Voice chat is disabled when Unity.WebRTC is unavailable (Unity 6+).
     /// </summary>
     [RequireComponent(typeof(RoomClient))]
     public class VoiceChat : MonoBehaviour
@@ -33,7 +25,7 @@ namespace MoviePlayer.Room
         // ── Inspector ─────────────────────────────────────────────────────────
         [Header("References")]
         public Player.HlsPlayerController MoviePlayer;
-        public AudioMixer MasterMixer;          // assign the mixer that controls movie audio
+        public AudioMixer MasterMixer;
         [Tooltip("AudioMixer exposed parameter name for movie volume")]
         public string MovieVolumeParam = "MovieVolume";
 
@@ -65,22 +57,24 @@ namespace MoviePlayer.Room
         // ── Private ───────────────────────────────────────────────────────────
         private RoomClient _roomClient;
         private string     _localDeviceId = string.Empty;
-
-        // One RTCPeerConnection per remote peer (mesh topology)
-        private readonly Dictionary<string, RTCPeerConnection> _peers
-            = new Dictionary<string, RTCPeerConnection>();
         private readonly List<string> _remotePeerIds = new List<string>();
 
-        // Local mic
-        private AudioStreamTrack _localTrack;
-        private AudioClip        _micClip;
-        private string           _micDevice;
-        private float[]          _vadBuffer = new float[1024];
+        // Local mic (used for VAD even without WebRTC)
+        private AudioClip   _micClip;
+        private AudioSource _micSource;
+        private string      _micDevice;
+        private float[]     _vadBuffer = new float[1024];
 
-        // Remote audio analysis for ducking
+        // Remote audio / ducking
         private float _remoteRmsPeak = 0f;
         private bool  _isDucked      = false;
-        private const float DuckDecay = 2f; // seconds to unduck after silence
+        private const float DuckDecay = 2f;
+
+#if UNITY_WEBRTC_AVAILABLE
+        private AudioStreamTrack _localTrack;
+        private readonly Dictionary<string, RTCPeerConnection> _peers
+            = new Dictionary<string, RTCPeerConnection>();
+#endif
 
         // ─────────────────────────────────────────────────────────────────────
         #region Unity Lifecycle
@@ -93,11 +87,13 @@ namespace MoviePlayer.Room
         private void OnEnable()
         {
             if (_roomClient == null) return;
-            _roomClient.OnJoined     += HandleJoined;
-            _roomClient.OnPeerLeft   += HandlePeerLeft;
-            _roomClient.OnRtcOffer   += HandleRtcOffer;
-            _roomClient.OnRtcAnswer  += HandleRtcAnswer;
-            _roomClient.OnRtcIce     += HandleRtcIce;
+            _roomClient.OnJoined    += HandleJoined;
+            _roomClient.OnPeerLeft  += HandlePeerLeft;
+#if UNITY_WEBRTC_AVAILABLE
+            _roomClient.OnRtcOffer  += HandleRtcOffer;
+            _roomClient.OnRtcAnswer += HandleRtcAnswer;
+            _roomClient.OnRtcIce    += HandleRtcIce;
+#endif
         }
 
         private void OnDisable()
@@ -106,11 +102,12 @@ namespace MoviePlayer.Room
             {
                 _roomClient.OnJoined    -= HandleJoined;
                 _roomClient.OnPeerLeft  -= HandlePeerLeft;
+#if UNITY_WEBRTC_AVAILABLE
                 _roomClient.OnRtcOffer  -= HandleRtcOffer;
                 _roomClient.OnRtcAnswer -= HandleRtcAnswer;
                 _roomClient.OnRtcIce    -= HandleRtcIce;
+#endif
             }
-
             TearDown();
         }
 
@@ -135,7 +132,15 @@ namespace MoviePlayer.Room
 
             _micDevice = Microphone.devices[0];
             _micClip   = Microphone.Start(_micDevice, loop: true, lengthSec: 1, frequency: 48000);
-            _localTrack = new AudioStreamTrack(_micClip);
+
+#if UNITY_WEBRTC_AVAILABLE
+            _micSource = gameObject.GetComponent<AudioSource>() ?? gameObject.AddComponent<AudioSource>();
+            _micSource.clip = _micClip;
+            _micSource.loop = true;
+            _micSource.mute = true;
+            _micSource.Play();
+            _localTrack = new AudioStreamTrack(_micSource);
+#endif
 
             Debug.Log($"[VoiceChat] Microphone started: {_micDevice}");
         }
@@ -145,10 +150,14 @@ namespace MoviePlayer.Room
             if (!string.IsNullOrEmpty(_micDevice))
                 Microphone.End(_micDevice);
 
+#if UNITY_WEBRTC_AVAILABLE
             _localTrack?.Dispose();
             _localTrack = null;
-            _micClip    = null;
-            _micDevice  = null;
+            if (_micSource != null) { _micSource.Stop(); _micSource.clip = null; }
+            _micSource = null;
+#endif
+            _micClip   = null;
+            _micDevice = null;
         }
 
         private float GetMicRms()
@@ -156,7 +165,6 @@ namespace MoviePlayer.Room
             if (_micClip == null) return 0f;
             int pos = Microphone.GetPosition(_micDevice);
             if (pos < _vadBuffer.Length) return 0f;
-
             _micClip.GetData(_vadBuffer, pos - _vadBuffer.Length);
             float sum = 0f;
             foreach (float s in _vadBuffer) sum += s * s;
@@ -173,10 +181,21 @@ namespace MoviePlayer.Room
             bool pttHeld = Input.GetKey(PttKey);
 
 #if UNITY_ANDROID && !UNITY_EDITOR
-            // OVRInput primary index trigger
-            pttHeld = pttHeld
-                || OVRInput.Get(OVRInput.Button.PrimaryIndexTrigger)
-                || OVRInput.Get(OVRInput.Button.SecondaryIndexTrigger);
+            // Poll XR controller triggers via Unity XR InputDevices (no Meta SDK needed).
+            var handedDevices = new System.Collections.Generic.List<UnityEngine.XR.InputDevice>();
+            UnityEngine.XR.InputDevices.GetDevicesWithRole(UnityEngine.XR.InputDeviceRole.LeftHanded, handedDevices);
+            foreach (var dev in handedDevices)
+            {
+                if (dev.TryGetFeatureValue(UnityEngine.XR.CommonUsages.triggerButton, out bool t) && t)
+                    pttHeld = true;
+            }
+            handedDevices.Clear();
+            UnityEngine.XR.InputDevices.GetDevicesWithRole(UnityEngine.XR.InputDeviceRole.RightHanded, handedDevices);
+            foreach (var dev in handedDevices)
+            {
+                if (dev.TryGetFeatureValue(UnityEngine.XR.CommonUsages.triggerButton, out bool t) && t)
+                    pttHeld = true;
+            }
 #endif
 
             bool speaking;
@@ -188,17 +207,16 @@ namespace MoviePlayer.Room
             IsSpeaking = speaking;
             IsMuted    = !speaking;
 
+#if UNITY_WEBRTC_AVAILABLE
             if (_localTrack != null)
                 _localTrack.Enabled = speaking;
+#endif
         }
 
         private void UpdateDucking()
         {
-            // Decay peak
             _remoteRmsPeak = Mathf.Max(0f, _remoteRmsPeak - Time.deltaTime * DuckDecay);
-
             bool shouldDuck = _remoteRmsPeak > DuckThresholdRms;
-
             if (shouldDuck == _isDucked) return;
             _isDucked = shouldDuck;
 
@@ -216,7 +234,6 @@ namespace MoviePlayer.Room
             Debug.Log($"[VoiceChat] Movie audio {(shouldDuck ? "ducked" : "restored")}.");
         }
 
-        // Called by AudioSource.OnAudioFilterRead on each remote AudioSource
         internal void ReportRemoteAudioRms(float rms)
         {
             _remoteRmsPeak = Mathf.Max(_remoteRmsPeak, rms);
@@ -231,7 +248,6 @@ namespace MoviePlayer.Room
         {
             _localDeviceId = state.device_id;
 
-            // Store TURN creds if provided
             if (state.turn != null)
             {
                 TurnUrl        = state.turn.url;
@@ -241,7 +257,7 @@ namespace MoviePlayer.Room
 
             StartMicrophone();
 
-            // Initiate offers to all existing peers (caller side)
+#if UNITY_WEBRTC_AVAILABLE
             if (state.seats != null)
             {
                 foreach (var seat in state.seats)
@@ -251,25 +267,31 @@ namespace MoviePlayer.Room
                         StartCoroutine(CreateOfferForPeer(seat.device_id));
                 }
             }
+#else
+            Debug.LogWarning("[VoiceChat] WebRTC unavailable — voice chat disabled.");
+#endif
         }
 
         private void HandlePeerLeft(string deviceId)
         {
+#if UNITY_WEBRTC_AVAILABLE
             if (_peers.TryGetValue(deviceId, out var pc))
             {
                 pc.Close();
                 pc.Dispose();
                 _peers.Remove(deviceId);
-                _remotePeerIds.Remove(deviceId);
-                Debug.Log($"[VoiceChat] Peer left, connection closed: {deviceId}");
             }
+#endif
+            _remotePeerIds.Remove(deviceId);
+            Debug.Log($"[VoiceChat] Peer left: {deviceId}");
         }
 
         #endregion
 
         // ─────────────────────────────────────────────────────────────────────
-        #region WebRTC Signaling Handlers
+        #region WebRTC (conditional)
 
+#if UNITY_WEBRTC_AVAILABLE
         private void HandleRtcOffer(RtcOfferMsg msg)
         {
             if (msg.to_device_id != _localDeviceId) return;
@@ -280,12 +302,7 @@ namespace MoviePlayer.Room
         {
             if (msg.to_device_id != _localDeviceId) return;
             if (!_peers.TryGetValue(msg.from_device_id, out var pc)) return;
-
-            var desc = new RTCSessionDescription
-            {
-                type = RTCSdpType.Answer,
-                sdp  = msg.sdp
-            };
+            var desc = new RTCSessionDescription { type = RTCSdpType.Answer, sdp = msg.sdp };
             StartCoroutine(SetRemoteDescription(pc, desc));
         }
 
@@ -293,7 +310,6 @@ namespace MoviePlayer.Room
         {
             if (msg.to_device_id != _localDeviceId) return;
             if (!_peers.TryGetValue(msg.from_device_id, out var pc)) return;
-
             pc.AddIceCandidate(new RTCIceCandidate(new RTCIceCandidateInit
             {
                 candidate     = msg.candidate,
@@ -301,11 +317,6 @@ namespace MoviePlayer.Room
                 sdpMLineIndex = msg.sdp_mline_index
             }));
         }
-
-        #endregion
-
-        // ─────────────────────────────────────────────────────────────────────
-        #region RTCPeerConnection Helpers
 
         private RTCPeerConnection CreatePeerConnection(string remotePeerId)
         {
@@ -327,18 +338,15 @@ namespace MoviePlayer.Room
             if (!_remotePeerIds.Contains(remotePeerId))
                 _remotePeerIds.Add(remotePeerId);
 
-            // Add local mic track
             if (_localTrack != null)
                 pc.AddTrack(_localTrack);
 
-            // Incoming remote track → attach to AudioSource
             pc.OnTrack += evt =>
             {
                 if (evt.Track is AudioStreamTrack audioTrack)
                     AttachRemoteAudio(remotePeerId, audioTrack);
             };
 
-            // ICE candidate → relay via WebSocket
             pc.OnIceCandidate += candidate =>
             {
                 _roomClient.SendRtcIce(new RtcIceMsg
@@ -365,9 +373,10 @@ namespace MoviePlayer.Room
             yield return offerOp;
             if (offerOp.IsError) { Debug.LogError($"[VoiceChat] CreateOffer error: {offerOp.Error.message}"); yield break; }
 
-            var localDescOp = pc.SetLocalDescription(ref offerOp.Desc);
+            var offerDesc   = offerOp.Desc;
+            var localDescOp = pc.SetLocalDescription(ref offerDesc);
             yield return localDescOp;
-            if (localDescOp.IsError) { Debug.LogError($"[VoiceChat] SetLocalDesc error"); yield break; }
+            if (localDescOp.IsError) { Debug.LogError("[VoiceChat] SetLocalDesc error"); yield break; }
 
             _roomClient.SendRtcOffer(new RtcOfferMsg
             {
@@ -388,9 +397,10 @@ namespace MoviePlayer.Room
 
             var answerOp = pc.CreateAnswer();
             yield return answerOp;
-            if (answerOp.IsError) { Debug.LogError($"[VoiceChat] CreateAnswer error"); yield break; }
+            if (answerOp.IsError) { Debug.LogError("[VoiceChat] CreateAnswer error"); yield break; }
 
-            var localDescOp = pc.SetLocalDescription(ref answerOp.Desc);
+            var answerDesc  = answerOp.Desc;
+            var localDescOp = pc.SetLocalDescription(ref answerDesc);
             yield return localDescOp;
 
             _roomClient.SendRtcAnswer(new RtcAnswerMsg
@@ -417,26 +427,29 @@ namespace MoviePlayer.Room
 
             var src = go.AddComponent<AudioSource>();
             src.SetTrack(track);
-            src.loop    = true;
-            src.spatialBlend = 0f; // 2D for voice
+            src.loop         = true;
+            src.spatialBlend = 0f;
             src.Play();
 
-            // Attach an RMS reporter for ducking
             var reporter = go.AddComponent<RemoteAudioRmsReporter>();
             reporter.VoiceChat = this;
 
             Debug.Log($"[VoiceChat] Remote audio attached for peer {peerId}");
         }
+#endif // UNITY_WEBRTC_AVAILABLE
+
+        #endregion
+
+        // ─────────────────────────────────────────────────────────────────────
+        #region Tear-down
 
         private void TearDown()
         {
             StopMicrophone();
-            foreach (var kv in _peers)
-            {
-                kv.Value.Close();
-                kv.Value.Dispose();
-            }
+#if UNITY_WEBRTC_AVAILABLE
+            foreach (var kv in _peers) { kv.Value.Close(); kv.Value.Dispose(); }
             _peers.Clear();
+#endif
             _remotePeerIds.Clear();
         }
 
@@ -444,10 +457,7 @@ namespace MoviePlayer.Room
     }
 
     // ─────────────────────────────────────────────────────────────────────────
-    /// <summary>
-    /// Lightweight helper attached to each remote AudioSource.
-    /// Reports RMS to VoiceChat for movie ducking.
-    /// </summary>
+    /// <summary>Helper attached to each remote AudioSource for ducking RMS.</summary>
     internal class RemoteAudioRmsReporter : MonoBehaviour
     {
         public VoiceChat VoiceChat;
@@ -455,11 +465,9 @@ namespace MoviePlayer.Room
 
         private void OnAudioFilterRead(float[] data, int channels)
         {
-            // RMS of this audio block
             float sum = 0f;
             foreach (float s in data) sum += s * s;
-            float rms = Mathf.Sqrt(sum / data.Length);
-            VoiceChat?.ReportRemoteAudioRms(rms);
+            VoiceChat?.ReportRemoteAudioRms(Mathf.Sqrt(sum / data.Length));
         }
     }
 }

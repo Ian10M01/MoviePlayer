@@ -45,7 +45,8 @@ namespace MoviePlayer.App
         public GameObject WatchingPanel;
 
         [Header("Setup Panel")]
-        public TMP_InputField HomeNodeUrlInput;
+        public TMP_InputField HomeNodeUrlInput;   // Media / packager URL
+        public TMP_InputField ApiUrlInput;         // Sync-server URL
         public Button         SaveSetupButton;
 
         [Header("Library Panel")]
@@ -76,11 +77,15 @@ namespace MoviePlayer.App
 
         private void Start()
         {
-            _homeNodeUrl = PlayerPrefs.GetString("homeNodeUrl", string.Empty);
-            _authToken   = PlayerPrefs.GetString("authToken",   string.Empty);
-            // Override inspector URL defaults with any saved values (fallback = inspector field)
+            // Read MediaUrl (packager) — support legacy "homeNodeUrl" key
+            _homeNodeUrl = PlayerPrefs.GetString("MediaUrl",
+                               PlayerPrefs.GetString("homeNodeUrl", string.Empty));
+            _authToken   = PlayerPrefs.GetString("authToken", string.Empty);
+            // Override inspector URL defaults with any saved values
             CloudApiUrl = PlayerPrefs.GetString("ApiUrl", CloudApiUrl);
             CloudWsUrl  = PlayerPrefs.GetString("WsUrl",  CloudWsUrl);
+
+            Debug.Log($"[App] Started.  MediaUrl={_homeNodeUrl}  ApiUrl={CloudApiUrl}");
 
             // Wire UI buttons
             if (SaveSetupButton != null) SaveSetupButton.onClick.AddListener(OnSaveSetup);
@@ -114,16 +119,32 @@ namespace MoviePlayer.App
 
         private void OnSaveSetup()
         {
-            string url = HomeNodeUrlInput?.text?.Trim() ?? string.Empty;
-            if (string.IsNullOrEmpty(url))
+            string mediaUrl = HomeNodeUrlInput?.text?.Trim() ?? string.Empty;
+            string apiUrl   = ApiUrlInput?.text?.Trim() ?? string.Empty;
+
+            if (string.IsNullOrEmpty(mediaUrl))
             {
-                Debug.LogWarning("[AppController] Home node URL is empty.");
+                Debug.LogWarning("[AppController] Packager URL is empty.");
                 return;
             }
 
-            _homeNodeUrl = url.TrimEnd('/');
-            PlayerPrefs.SetString("homeNodeUrl", _homeNodeUrl);
+            _homeNodeUrl = mediaUrl.TrimEnd('/');
+            PlayerPrefs.SetString("MediaUrl",    _homeNodeUrl);
+            PlayerPrefs.SetString("homeNodeUrl", _homeNodeUrl); // backward compat
+
+            if (!string.IsNullOrEmpty(apiUrl))
+            {
+                CloudApiUrl = apiUrl.TrimEnd('/');
+                // Derive WebSocket URL from API URL
+                CloudWsUrl = CloudApiUrl
+                    .Replace("https://", "wss://")
+                    .Replace("http://",  "ws://");
+                PlayerPrefs.SetString("ApiUrl", CloudApiUrl);
+                PlayerPrefs.SetString("WsUrl",  CloudWsUrl);
+            }
+
             PlayerPrefs.Save();
+            Debug.Log($"[App] Saved URLs — MediaUrl={_homeNodeUrl}  ApiUrl={CloudApiUrl}");
 
             ShowPanel(LibraryPanel);
             StartCoroutine(FetchLibrary());

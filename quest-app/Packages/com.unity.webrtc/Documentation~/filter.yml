@@ -1,0 +1,10 @@
+apiRules:
+- exclude:
+    uidRegex: ^System\.Object\..*$
+    type: Method
+- exclude:
+    uidRegex: ^System\.ValueType\..*$
+    type: Method
+- exclude:
+    hasAttribute:
+      uid: System.ObsoleteAttribute

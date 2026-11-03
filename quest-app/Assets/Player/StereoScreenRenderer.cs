@@ -71,6 +71,15 @@ namespace MoviePlayer.Player
             Apply(layout, proj, manifest.eye_swap);
         }
 
+        /// <summary>Assign a video RenderTexture to the screen mesh's material.</summary>
+        public void SetMainTexture(Texture tex)
+        {
+            if (_meshRenderer == null) BuildScreenObject();
+            var mat = _meshRenderer != null ? _meshRenderer.material : null;
+            if (mat == null && ScreenMaterial != null) mat = ScreenMaterial;
+            if (mat != null) mat.SetTexture("_MainTex", tex);
+        }
+
         public void Apply(StereoLayout layout, ProjectionType proj, bool eyeSwap = false)
         {
             _stereoLayout = layout;

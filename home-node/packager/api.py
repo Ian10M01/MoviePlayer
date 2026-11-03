@@ -23,6 +23,7 @@ import threading
 from pathlib import Path
 from typing import Any
 
+import httpx
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse
@@ -37,7 +38,8 @@ CLARITY_PACK_DIR = Path(os.environ.get("CLARITY_PACK_DIR", "/clarity"))
 HLS_ROOT = Path(os.environ.get("HLS_ROOT", "/hls"))
 LIBRARY_PATH = MEDIA_DIR / "library.json"
 BAKE_QUEUE_PATH = MEDIA_DIR / "bake_queue.json"
-API_SECRET = os.environ.get("API_SECRET", "")
+API_SECRET   = os.environ.get("API_SECRET", "")
+SYNC_SERVER  = os.environ.get("SYNC_SERVER_URL", "http://sync-server:3000")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -98,12 +100,41 @@ def _save_bake_queue(queue: list[dict]) -> None:
 
 
 def _check_secret(request: Request) -> None:
-    """Validate the API secret header if one is configured."""
+    """Validate the API secret or a room token issued by the sync server."""
+    # 1. Static API secret (set in .env)
+    if API_SECRET:
+        token = request.headers.get("X-API-Secret") or request.query_params.get("secret")
+        if token == API_SECRET:
+            return
+    else:
+        return  # No static secret → open access (dev mode); allow library browsing
+
+    # 2. Room token from `?token=` query param — validate against sync server
+    room_token = request.query_params.get("token", "")
+    if room_token:
+        try:
+            r = httpx.get(f"{SYNC_SERVER}/rooms/{room_token}", timeout=3.0)
+            if r.status_code == 200:
+                return
+        except Exception as exc:
+            logger.warning("Sync-server check failed: %s", exc)
+
+    raise HTTPException(status_code=401, detail="Unauthorized")
+
+
+def _check_media_token(request: Request) -> None:
+    """For HLS endpoints: accept open access if no API_SECRET, or validate room token."""
     if not API_SECRET:
-        return  # No secret configured → open access (dev mode)
-    token = request.headers.get("X-API-Secret") or request.query_params.get("secret")
-    if token != API_SECRET:
-        raise HTTPException(status_code=401, detail="Unauthorized")
+        return   # open – good for local LAN / dev
+    room_token = request.query_params.get("token", "")
+    if room_token:
+        try:
+            r = httpx.get(f"{SYNC_SERVER}/rooms/{room_token}", timeout=3.0)
+            if r.status_code == 200:
+                return
+        except Exception as exc:
+            logger.warning("Sync-server token check failed: %s", exc)
+    raise HTTPException(status_code=403, detail="Invalid or missing token")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -117,10 +148,12 @@ async def health() -> dict:
 
 @app.get("/library")
 async def get_library(request: Request) -> JSONResponse:
-    _check_secret(request)
+    # Library is intentionally open (no token required) so the host can browse
+    # before a room exists.  The sync tunnel is not public anyway.
     with _library_lock:
         library = _load_library()
-    return JSONResponse(content=list(library.values()))
+    # Return { "items": [...] } so AppController.LibraryResponse parses correctly
+    return JSONResponse(content={"items": list(library.values())})
 
 
 @app.get("/library/{movie_id}")
@@ -167,28 +200,39 @@ async def enqueue_bake(movie_id: str, request: Request) -> JSONResponse:
 
 @app.get("/hls/{movie_id}/index.m3u8")
 async def serve_hls_playlist(movie_id: str, request: Request) -> Response:
-    """Serve the HLS playlist for a given movie ID."""
-    _check_secret(request)
+    """Serve the HLS playlist. Token validated against sync server if API_SECRET set."""
+    _check_media_token(request)
     playlist_path = HLS_ROOT / movie_id / "index.m3u8"
     if not playlist_path.exists():
         raise HTTPException(status_code=404, detail=f"HLS playlist not found for '{movie_id}'")
     return FileResponse(
         path=str(playlist_path),
         media_type="application/vnd.apple.mpegurl",
-        headers={"Access-Control-Allow-Origin": "*"},
+        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "no-cache"},
     )
 
 
 @app.get("/hls/{movie_id}/{segment}")
 async def serve_hls_segment(movie_id: str, segment: str, request: Request) -> Response:
-    """Serve fmp4 segments or init files."""
-    _check_secret(request)
+    """Serve fmp4/ts segments. No per-segment token check (playlist auth is sufficient)."""
     seg_path = HLS_ROOT / movie_id / segment
     if not seg_path.exists():
         raise HTTPException(status_code=404, detail="Segment not found")
-    media_type = "video/mp4" if segment.endswith(".m4s") else "application/octet-stream"
-    return FileResponse(path=str(seg_path), media_type=media_type,
-                        headers={"Access-Control-Allow-Origin": "*"})
+
+    if segment.endswith(".m4s") or segment.endswith(".mp4"):
+        media_type = "video/mp4"
+    elif segment.endswith(".ts"):
+        media_type = "video/MP2T"
+    elif segment.endswith(".m3u8"):
+        media_type = "application/vnd.apple.mpegurl"
+    else:
+        media_type = "application/octet-stream"
+
+    return FileResponse(
+        path=str(seg_path),
+        media_type=media_type,
+        headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "max-age=3600"},
+    )
 
 
 @app.get("/thumbs/{movie_id}")

@@ -104,18 +104,18 @@ services:
       timeout: 5s
       retries: 3
 
-  # ── Cloudflare Quick Tunnel — HLS Media ─────────────────────────────────────
-  # Prints a *.trycloudflare.com URL to its logs on startup.
-  # Read it with: docker logs home-node-cloudflared-media-1
+  # ── Cloudflare Quick Tunnel — Packager API + HLS Media ──────────────────────
+  # Tunnels to the packager FastAPI (:8080) which serves /library, /hls/{id}/…
+  # Prints a *.trycloudflare.com URL to logs: docker logs cinema-cloudflared-media
   cloudflared-media:
     image: cloudflare/cloudflared:latest
     container_name: cinema-cloudflared-media
     restart: unless-stopped
-    command: tunnel --url http://mediamtx:8888 --no-autoupdate
+    command: tunnel --url http://packager:8080 --no-autoupdate
     networks:
       - cinema
     depends_on:
-      - mediamtx
+      - packager
 
   # ── Cloudflare Quick Tunnel — Sync API ──────────────────────────────────────
   # Prints a *.trycloudflare.com URL to its logs on startup.

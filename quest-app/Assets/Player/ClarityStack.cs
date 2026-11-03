@@ -1,8 +1,5 @@
 using UnityEngine;
-
-#if UNITY_ANDROID && !UNITY_EDITOR
-using Unity.XR.Oculus;          // OVRPlugin lives here in Meta XR SDK ≥ 60
-#endif
+using UnityEngine.XR;
 
 namespace MoviePlayer.Player
 {
@@ -74,26 +71,18 @@ namespace MoviePlayer.Player
 #if UNITY_ANDROID && !UNITY_EDITOR
             try
             {
-                // Enable premultiplied-alpha compositing (required for SR)
-                OVRManager.eyeFovPremultipliedAlphaModeEnabled = false;
-
-                // Request Quality-level FSR sharpening from the Meta compositor
-                // LayerSharpenType.Quality = 2 in current Meta XR SDK
-                bool ok = OVRPlugin.SetEyeBufferSharpenType(
-                    OVRPlugin.LayerSharpenType.Quality);
-
-                if (ok)
-                    Debug.Log("[ClarityStack] Compositor Super Resolution (Quality) enabled.");
-                else
-                    Debug.LogWarning("[ClarityStack] SetEyeBufferSharpenType returned false — " +
-                        "check Meta XR SDK version (≥53 required).");
+                // Boost eye buffer resolution as a substitute for compositor FSR.
+                // XRSettings.eyeTextureResolutionScale > 1 renders at higher resolution
+                // and the compositor downsamples, producing a sharpening-like effect.
+                XRSettings.eyeTextureResolutionScale = 1.4f;
+                Debug.Log("[ClarityStack] Eye texture resolution scale set to 1.4 (Super Resolution substitute).");
             }
             catch (System.Exception e)
             {
                 Debug.LogWarning($"[ClarityStack] SR init exception: {e.Message}");
             }
 #else
-            Debug.Log("[ClarityStack] EDITOR — Super Resolution skipped (Quest only).");
+            Debug.Log("[ClarityStack] Super Resolution skipped (not running on device).");
 #endif
         }
 
