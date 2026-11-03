@@ -1,0 +1,45 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  HOST
+  GUEST
+}
+
+model Room {
+  id          String   @id @default(cuid())
+  code        String   @unique @db.VarChar(6)
+  hostDeviceId String
+  hlsBaseUrl  String
+  mediaId     String
+  mediaName   String
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+  state       Json     @default("{}")
+  seats       Seat[]
+
+  @@index([code])
+  @@index([expiresAt])
+}
+
+model Seat {
+  id          String   @id @default(cuid())
+  roomId      String
+  deviceId    String
+  displayName String
+  role        Role
+  joinedAt    DateTime @default(now())
+  room        Room     @relation(fields: [roomId], references: [id], onDelete: Cascade)
+
+  @@unique([roomId, deviceId])
+  @@index([roomId])
+}
