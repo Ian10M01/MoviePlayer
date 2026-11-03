@@ -1,0 +1,19 @@
+# Unity generated / machine-local
+Library/
+Temp/
+Logs/
+UserSettings/
+obj/
+Build/
+build/
+.utmp/
+.vs/
+.vscode/
+.funplay/
+.claude/
+*.csproj
+*.slnx
+*.apk
+*.log
+ExoPlayerPlugin/local.properties
+.DS_Store

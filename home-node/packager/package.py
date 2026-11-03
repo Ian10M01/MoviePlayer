@@ -19,7 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from stereo_classifier import classify
-from format_compat import assess_compatibility
+from format_compat import assess_compatibility, audio_output_layouts
 
 logger = logging.getLogger(__name__)
 
@@ -98,68 +98,241 @@ def run_ffprobe(file_path: Path) -> dict[str, Any] | None:
 # HLS packaging
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _build_ffmpeg_hls_cmd(
-    source: Path,
-    hls_dir: Path,
-    manifest: dict[str, Any],
-    compat: dict[str, Any],
-) -> list[str]:
-    """
-    Build the FFmpeg command that produces H.264/AAC fMP4 VOD HLS.
-    Copies an existing H.264 or AAC stream; otherwise transcodes to
-    libx264 High + AAC so Quest MediaPlayer can play the playlist.
-    """
-    codec = (manifest.get("codec") or "").lower()
-    _ = compat  # retained for callers; output is always H.264/AAC
+def _run_ffmpeg(cmd: list[str], timeout: int) -> tuple[bool, str]:
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return False, "timed out"
+    except OSError as exc:
+        return False, str(exc)
+    if result.returncode != 0:
+        return False, (result.stderr or result.stdout or "")[-500:]
+    return True, ""
 
-    if codec in ("h264", "avc"):
-        video_args = ["-c:v", "copy", "-tag:v", "avc1"]
+
+def _video_codec_name(probe: dict[str, Any]) -> str:
+    for stream in probe.get("streams") or []:
+        if stream.get("codec_type") == "video":
+            return (stream.get("codec_name") or "").lower()
+    return ""
+
+
+def _audio_streams(probe: dict[str, Any]) -> list[dict[str, Any]]:
+    return [s for s in (probe.get("streams") or []) if s.get("codec_type") == "audio"]
+
+
+def _stream_channels(stream: dict[str, Any]) -> int:
+    try:
+        count = int(stream.get("channels") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count > 0:
+        return count
+    layout = (stream.get("channel_layout") or "").lower()
+    if "7.1" in layout:
+        return 8
+    if "5.1" in layout or "6.1" in layout:
+        return 6
+    return 2
+
+
+def _stream_language(stream: dict[str, Any]) -> str:
+    tags = stream.get("tags") or {}
+    return tags.get("language") or tags.get("LANGUAGE") or "und"
+
+
+def _encode_aac(source: Path, ordinal: int, dest: Path, layout: str) -> bool:
+    """Transcode one source audio stream to AAC-LC.
+
+    Stereo always retries with ``-ac 2``, which downmixes 5.1, 7.1 and
+    Atmos beds. 5.1 is best-effort and may be skipped.
+    """
+    if layout == "5.1":
+        attempts = [
+            ["-af", "aresample=48000,aformat=channel_layouts=5.1", "-ac", "6", "-b:a", "384k"],
+            ["-af", "aresample=48000", "-ac", "6", "-ar", "48000", "-b:a", "384k"],
+            ["-ac", "6", "-ar", "48000", "-b:a", "384k"],
+        ]
     else:
-        video_args = [
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "20",
-            "-profile:v", "high",
-            "-pix_fmt", "yuv420p",
-            "-tag:v", "avc1",
+        attempts = [
+            ["-af", "aresample=48000", "-ac", "2", "-ar", "48000", "-b:a", "192k"],
+            ["-ac", "2", "-ar", "48000", "-b:a", "192k"],
         ]
 
-    tracks = manifest.get("audio_tracks") or []
-    audio_is_aac = bool(tracks) and all(
-        (t.get("codec") or "").lower() in ("aac", "mp4a") for t in tracks
-    )
-    audio_args = ["-c:a", "copy"] if audio_is_aac else ["-c:a", "aac", "-b:a", "192k", "-ac", "2"]
+    for extra in attempts:
+        if dest.exists():
+            dest.unlink()
+        cmd = [
+            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+            "-i", str(source),
+            "-map", f"0:a:{ordinal}",
+            "-vn",
+            "-c:a", "aac",
+            "-profile:a", "aac_low",
+            *extra,
+            str(dest),
+        ]
+        ok, err = _run_ffmpeg(cmd, timeout=3600)
+        if ok and dest.is_file() and dest.stat().st_size > 0:
+            return True
+        logger.warning(
+            "AAC %s encode failed for audio stream %s (%s)",
+            layout, ordinal, err.strip() or "empty output",
+        )
+    return False
 
+
+def _silent_stereo(dest: Path, duration_s: float) -> bool:
+    duration = max(float(duration_s or 0), 1.0)
+    if dest.exists():
+        dest.unlink()
+    cmd = [
+        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+        "-f", "lavfi",
+        "-i", "anullsrc=channel_layout=stereo:sample_rate=48000",
+        "-t", f"{duration:.3f}",
+        "-c:a", "aac",
+        "-profile:a", "aac_low",
+        "-b:a", "64k",
+        "-ac", "2",
+        str(dest),
+    ]
+    ok, err = _run_ffmpeg(cmd, timeout=600)
+    if not ok:
+        logger.error("Silent AAC fallback failed: %s", err.strip())
+    return ok and dest.is_file() and dest.stat().st_size > 0
+
+
+def _collect_aac_tracks(source: Path, probe: dict[str, Any], work: Path) -> list[dict[str, Any]]:
+    """Encode every audio stream to AAC. One failure does not abort the movie."""
+    stereo: list[dict[str, Any]] = []
+    surround: list[dict[str, Any]] = []
+    streams = _audio_streams(probe)
+
+    for ordinal, stream in enumerate(streams):
+        codec = (stream.get("codec_name") or "unknown").lower()
+        channels = _stream_channels(stream)
+        language = _stream_language(stream)
+        logger.info(
+            "Audio stream %s codec=%s channels=%s -> AAC-LC",
+            ordinal, codec, channels,
+        )
+        for layout in audio_output_layouts(channels):
+            dest = work / f"a{ordinal}_{'51' if layout == '5.1' else 'st'}.m4a"
+            if not _encode_aac(source, ordinal, dest, layout):
+                logger.warning("Skipping audio stream %s layout %s", ordinal, layout)
+                continue
+            out_channels = 6 if layout == "5.1" else 2
+            title = f"{language} AAC {'5.1' if layout == '5.1' else 'stereo'}"
+            entry = {
+                "path": str(dest),
+                "channels": out_channels,
+                "codec": "aac",
+                "language": language,
+                "title": title,
+                "source_codec": codec,
+                "default": False,
+            }
+            (surround if layout == "5.1" else stereo).append(entry)
+
+    if not stereo:
+        logger.warning("No stereo AAC track encoded; generating silent AAC stereo.")
+        duration = 0.0
+        try:
+            duration = float((probe.get("format") or {}).get("duration") or 0)
+        except (TypeError, ValueError):
+            duration = 0.0
+        dest = work / "silent_stereo.m4a"
+        if _silent_stereo(dest, duration):
+            stereo.append({
+                "path": str(dest),
+                "channels": 2,
+                "codec": "aac",
+                "language": "und",
+                "title": "Silent AAC stereo",
+                "source_codec": "none",
+                "default": False,
+            })
+
+    # Stereo is the default Quest playback track; 5.1 follows it.
+    ordered = stereo + surround
+    if ordered:
+        ordered[0]["default"] = True
+    return ordered
+
+
+def _video_args(copy_h264: bool) -> list[str]:
+    if copy_h264:
+        return ["-c:v", "copy", "-tag:v", "avc1"]
+    return [
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-crf", "20",
+        "-profile:v", "high",
+        "-pix_fmt", "yuv420p",
+        "-tag:v", "avc1",
+    ]
+
+
+def _mux_hls(source: Path, tracks: list[dict[str, Any]], hls_dir: Path, copy_h264: bool) -> bool:
+    """H.264 video plus AAC tracks in one fMP4 VOD playlist. Stereo is first."""
     index_path = str(hls_dir / "index.m3u8")
     segment_pattern = str(hls_dir / "seg%05d.m4s")
+    cmd = ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning", "-i", str(source)]
+    for track in tracks:
+        cmd += ["-i", track["path"]]
+    cmd += ["-map", "0:v:0"]
+    for i in range(len(tracks)):
+        cmd += ["-map", f"{i + 1}:a:0"]
+    cmd += _video_args(copy_h264)
+    cmd += ["-c:a", "copy"]
+    for i, track in enumerate(tracks):
+        cmd += [f"-disposition:a:{i}", "default" if track.get("default") else "0"]
+        cmd += [f"-metadata:s:a:{i}", f"title={track.get('title') or 'AAC'}"]
+    cmd += [
+        "-f", "hls",
+        "-hls_time", str(SEGMENT_DURATION),
+        "-hls_segment_type", "fmp4",
+        "-hls_segment_filename", segment_pattern,
+        "-hls_playlist_type", "vod",
+        "-hls_flags", "independent_segments",
+        "-movflags", "+faststart",
+        index_path,
+    ]
+    ok, err = _run_ffmpeg(cmd, timeout=3600)
+    if not ok:
+        logger.error("FFmpeg HLS mux failed:\n%s", err)
+    return ok
 
-    cmd = (
-        ["ffmpeg", "-y", "-hide_banner", "-loglevel", "warning"]
-        + ["-i", str(source)]
-        + video_args
-        + audio_args
-        + [
-            "-f", "hls",
-            "-hls_time", str(SEGMENT_DURATION),
-            "-hls_segment_type", "fmp4",
-            "-hls_segment_filename", segment_pattern,
-            "-hls_playlist_type", "vod",
-            "-hls_flags", "independent_segments",
-            "-movflags", "+faststart",
-            index_path,
-        ]
-    )
-    return cmd
+
+def _remember_packaged_audio(manifest: dict[str, Any], tracks: list[dict[str, Any]]) -> None:
+    manifest["source_audio_tracks"] = list(manifest.get("audio_tracks") or [])
+    manifest["audio_tracks"] = [
+        {
+            "index": i,
+            "channels": track["channels"],
+            "codec": "aac",
+            "language": track.get("language") or "und",
+            "title": track.get("title") or "AAC",
+            "source_codec": track.get("source_codec") or "",
+        }
+        for i, track in enumerate(tracks)
+    ]
 
 
 def package_hls(source: Path, manifest: dict[str, Any], compat: dict[str, Any]) -> bool:
     """
-    Run FFmpeg to produce HLS fmp4 segments.
-    Returns True on success.
+    Produce H.264 High + AAC-LC fMP4 VOD HLS.
+
+    Every audio codec (aac, mp3, ac3, eac3, truehd, dts, dtshd, flac, opus,
+    pcm, vorbis, atmos, and anything unknown) is transcoded to AAC-LC.
+    Multichannel sources also get an AAC 5.1 track when the encoder accepts
+    the layout. The first audio track is always stereo AAC. A single bad
+    audio stream is skipped; the movie still ships with one stereo track.
     """
+    _ = compat  # video decision uses the file actually packaged
     movie_id = manifest["id"]
 
-    # Prefer Clarity Pack if available
     clarity_pack = CLARITY_PACK_DIR / f"{movie_id}_clarity.mp4"
     actual_source = clarity_pack if clarity_pack.is_file() else source
 
@@ -171,19 +344,49 @@ def package_hls(source: Path, manifest: dict[str, Any], compat: dict[str, Any]) 
         logger.debug("HLS already packaged for %s, skipping.", movie_id)
         return True
 
-    logger.info("Packaging HLS for %s (source: %s)", movie_id, actual_source.name)
-    cmd = _build_ffmpeg_hls_cmd(actual_source, hls_dir, manifest, compat)
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
-        if result.returncode != 0:
-            logger.error("FFmpeg HLS failed for %s:\n%s", movie_id, result.stderr[-500:])
-            return False
-    except subprocess.TimeoutExpired:
-        logger.error("FFmpeg HLS timed out for %s", movie_id)
+    probe = run_ffprobe(actual_source)
+    if probe is None:
+        logger.error("ffprobe failed for HLS source %s", actual_source)
         return False
 
-    logger.info("HLS packaging complete for %s", movie_id)
+    video_codec = _video_codec_name(probe)
+    copy_h264 = video_codec in ("h264", "avc")
+    if not copy_h264:
+        logger.info("Transcoding video %s to H.264 High for %s", video_codec or "unknown", movie_id)
+
+    work = hls_dir / "_audio"
+    work.mkdir(parents=True, exist_ok=True)
+    logger.info("Packaging HLS for %s (source: %s)", movie_id, actual_source.name)
+
+    try:
+        tracks = _collect_aac_tracks(actual_source, probe, work)
+        if not tracks:
+            logger.error("No AAC audio track could be produced for %s", movie_id)
+            return False
+
+        ok = _mux_hls(actual_source, tracks, hls_dir, copy_h264)
+        if not ok and copy_h264:
+            logger.warning("H.264 copy mux failed for %s; transcoding video.", movie_id)
+            if index_path.exists():
+                index_path.unlink()
+            ok = _mux_hls(actual_source, tracks, hls_dir, copy_h264=False)
+        if not ok:
+            if index_path.exists():
+                index_path.unlink()
+            return False
+        _remember_packaged_audio(manifest, tracks)
+    finally:
+        for leftover in work.glob("*"):
+            try:
+                leftover.unlink()
+            except OSError:
+                pass
+        try:
+            work.rmdir()
+        except OSError:
+            pass
+
+    logger.info("HLS packaging complete for %s (%d AAC track(s))", movie_id, len(tracks))
     return True
 
 

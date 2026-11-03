@@ -257,3 +257,30 @@ def assess_compatibility(
         "per_eye_width": per_eye_width,
         "notes": notes,
     }
+
+
+# Quest HLS audio is always re-encoded to AAC-LC. These names are recognised;
+# anything else (including atmos beds reported as truehd/eac3) takes the same path.
+AUDIO_TRANSCODE_CODECS = {
+    "aac", "mp4a", "mp3",
+    "ac3", "eac3", "truehd", "atmos",
+    "dts", "dts_hd", "dtshd",
+    "flac", "opus", "vorbis",
+    "pcm_s16le", "pcm_s16be", "pcm_s24le", "pcm_s32le", "pcm_f32le", "pcm_u8",
+}
+
+
+def audio_output_layouts(channels: int) -> list[str]:
+    """Layouts to emit for one source stream.
+
+    Stereo AAC is always produced (``-ac 2`` downmix). A 5.1 AAC track is
+    added when the source has more than two channels; the packager drops it
+    if the encoder rejects that layout.
+    """
+    try:
+        count = int(channels or 0)
+    except (TypeError, ValueError):
+        count = 0
+    if count > 2:
+        return ["stereo", "5.1"]
+    return ["stereo"]
