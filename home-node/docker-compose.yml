@@ -1,23 +1,26 @@
 version: "3.9"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MoviePlayer VR Cinema – Home Node
+# MoviePlayer VR Cinema – Home Node  (free / no-account setup)
 # ─────────────────────────────────────────────────────────────────────────────
-# Required .env keys:
-#   CLOUDFLARE_TUNNEL_TOKEN   – Cloudflare Zero Trust tunnel token
-#   CLOUD_API_URL             – Base URL of the cloud relay (e.g. https://api.example.com)
-#   MEDIA_DIR                 – Absolute host path to your movies folder
-#   CLARITY_PACK_DIR          – Absolute host path where clarity packs are written
-#   API_SECRET                – Shared secret between packager API and cloud relay
+# Required .env keys (copy .env.example → .env and edit):
+#   MEDIA_DIR        – host path to your movies folder (use forward slashes)
+#   CLARITY_PACK_DIR – host path for upscaled Clarity Pack output
+#
+# Two Cloudflare Quick-Tunnel containers print *.trycloudflare.com URLs to
+# stdout on startup.  No account, no token, no credit card required.
 # ─────────────────────────────────────────────────────────────────────────────
 
 networks:
   cinema:
     driver: bridge
 
+volumes:
+  hls_data:   # shared HLS segments between packager and mediamtx
+
 services:
 
-  # ── Packager ───────────────────────────────────────────────────────────────
+  # ── Packager ────────────────────────────────────────────────────────────────
   packager:
     build:
       context: ./packager
@@ -27,13 +30,11 @@ services:
     environment:
       MEDIA_DIR: /media
       CLARITY_PACK_DIR: /clarity
-      CLOUD_API_URL: ${CLOUD_API_URL}
-      API_SECRET: ${API_SECRET}
       MEDIAMTX_URL: http://mediamtx:9997
     volumes:
-      - ${MEDIA_DIR}:/media
-      - ${CLARITY_PACK_DIR}:/clarity
-      - hls_segments:/hls
+      - ${MEDIA_DIR}:/media:ro
+      - ${CLARITY_PACK_DIR:-/tmp/clarity}:/clarity
+      - hls_data:/hls
     ports:
       - "8080:8080"
     networks:
@@ -46,7 +47,7 @@ services:
       timeout: 10s
       retries: 3
 
-  # ── Clarity Worker ─────────────────────────────────────────────────────────
+  # ── Clarity Worker ──────────────────────────────────────────────────────────
   clarity-worker:
     build:
       context: ./clarity-worker
@@ -58,11 +59,11 @@ services:
       CLARITY_PACK_DIR: /clarity
       FAST_MODE: ${CLARITY_FAST_MODE:-0}
     volumes:
-      - ${MEDIA_DIR}:/media
-      - ${CLARITY_PACK_DIR}:/clarity
+      - ${MEDIA_DIR}:/media:ro
+      - ${CLARITY_PACK_DIR:-/tmp/clarity}:/clarity
     networks:
       - cinema
-    # GPU passthrough – ignored silently if no NVIDIA runtime is present
+    # GPU passthrough – silently ignored if no NVIDIA runtime is present
     deploy:
       resources:
         reservations:
@@ -71,36 +72,60 @@ services:
               count: all
               capabilities: [gpu]
 
-  # ── MediaMTX (HLS + RTSP server) ──────────────────────────────────────────
+  # ── MediaMTX (HLS + RTSP server) ────────────────────────────────────────────
   mediamtx:
     image: bluenviron/mediamtx:latest
     container_name: cinema-mediamtx
     restart: unless-stopped
     volumes:
       - ./mediamtx.yml:/mediamtx.yml:ro
-      - hls_segments:/hls
+      - hls_data:/hls
     ports:
       - "8888:8888"   # HLS
       - "8554:8554"   # RTSP
       - "9997:9997"   # API
     networks:
       - cinema
-    environment:
-      MTX_PATHS_ALL_SOURCE: publisher
 
-  # ── Cloudflared Tunnel ─────────────────────────────────────────────────────
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: cinema-cloudflared
+  # ── In-Memory Sync Server (replaces Fly.io cloud) ───────────────────────────
+  sync-server:
+    build:
+      context: ./sync-server
+      dockerfile: Dockerfile
+    container_name: cinema-sync-server
     restart: unless-stopped
-    command: tunnel --no-autoupdate run
-    environment:
-      TUNNEL_TOKEN: ${CLOUDFLARE_TUNNEL_TOKEN}
+    ports:
+      - "3000:3000"
+    networks:
+      - cinema
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/health"]
+      interval: 20s
+      timeout: 5s
+      retries: 3
+
+  # ── Cloudflare Quick Tunnel — HLS Media ─────────────────────────────────────
+  # Prints a *.trycloudflare.com URL to its logs on startup.
+  # Read it with: docker logs home-node-cloudflared-media-1
+  cloudflared-media:
+    image: cloudflare/cloudflared:latest
+    container_name: cinema-cloudflared-media
+    restart: unless-stopped
+    command: tunnel --url http://mediamtx:8888 --no-autoupdate
     networks:
       - cinema
     depends_on:
-      - packager
       - mediamtx
 
-volumes:
-  hls_segments:
+  # ── Cloudflare Quick Tunnel — Sync API ──────────────────────────────────────
+  # Prints a *.trycloudflare.com URL to its logs on startup.
+  # Read it with: docker logs home-node-cloudflared-api-1
+  cloudflared-api:
+    image: cloudflare/cloudflared:latest
+    container_name: cinema-cloudflared-api
+    restart: unless-stopped
+    command: tunnel --url http://sync-server:3000 --no-autoupdate
+    networks:
+      - cinema
+    depends_on:
+      - sync-server

@@ -1,0 +1,36 @@
+plugins {
+    id 'com.android.library'
+}
+
+android {
+    namespace 'com.movieplayer'
+    compileSdk 34
+
+    defaultConfig {
+        minSdk 29       // Meta Quest 2/3 ships with Android 10 (API 29)
+        targetSdk 34
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_11
+        targetCompatibility JavaVersion.VERSION_11
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+        }
+    }
+}
+
+dependencies {
+    // ExoPlayer via AndroidX Media3
+    implementation 'androidx.media3:media3-exoplayer:1.3.1'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.3.1'
+    implementation 'androidx.media3:media3-common:1.3.1'
+    implementation 'androidx.annotation:annotation:1.7.1'
+
+    // Unity stub JAR — copy from your Unity install before building.
+    // See BUILD_INSTRUCTIONS.md for the exact path.
+    compileOnly files('libs/unity-classes.jar')
+}
