@@ -1,0 +1,11 @@
+{
+ "rangeHouse": 3.0011353492736816,
+ "rangeScreen": 0.9995959997177124,
+ "lightmapSize": 2048,
+ "samples": 64,
+ "screenBakeRadiance": 1.0,
+ "screenBakeSize": [
+  16.0,
+  9.0
+ ]
+}

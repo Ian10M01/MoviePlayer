@@ -1,0 +1,30 @@
+{
+	DTSDKName = "iphoneos16.0";
+	DTXcode = 1400;
+	DTSDKBuild = 20A360;
+	"CFBundleDevelopmentRegion" = English;
+	CFBundleVersion = "3.0.0";
+	BuildMachineOSBuild = 21G115;
+	DTPlatformName = iphoneos;
+	CFBundlePackageType = FMWK;
+	"CFBundleShortVersionString" = "3.0.0";
+	"CFBundleSupportedPlatforms" = (
+		iPhoneOS,
+	);
+	"CFBundleInfoDictionaryVersion" = "6.0";
+	CFBundleExecutable = webrtc;
+	DTCompiler = "com.apple.compilers.llvm.clang.1_0";
+	"UIRequiredDeviceCapabilities" = (
+		arm64,
+	);
+	MinimumOSVersion = "10.0";
+	CFBundleIdentifier = "com.unity.webrtc";
+	UIDeviceFamily = (
+		1,
+	);
+	CFBundleSignature = "????";
+	DTPlatformVersion = "16.0";
+	"CSResourcesFileMapped" = YES;
+	DTXcodeBuild = 14A309;
+	DTPlatformBuild = 20A360;
+}
