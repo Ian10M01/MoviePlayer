@@ -719,6 +719,11 @@ public static class SceneBuilder
 
         var scrollRect = sv.AddComponent<ScrollRect>();
         scrollRect.horizontal = false;
+        scrollRect.vertical = true;
+        scrollRect.movementType = ScrollRect.MovementType.Clamped;
+        scrollRect.inertia = true;
+        scrollRect.decelerationRate = 0.1f;
+        scrollRect.scrollSensitivity = 80f;
 
         var viewport = new GameObject("Viewport");
         viewport.transform.SetParent(sv.transform, false);

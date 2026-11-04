@@ -201,49 +201,29 @@ namespace MoviePlayer.App
                 PointerUp(hasHit ? hit.gameObject : null);
             }
 
-            // Thumbstick up/down scrolls whatever list is under the pointer.
+            // Thumbstick up/down scrolls the list under the pointer. It does not move
+            // language buttons; those are not inside a ScrollRect.
             if (hasHit)
             {
                 float y = ActiveStick.ReadValue<Vector2>().y;
-                if (Mathf.Abs(y) > 0.2f)
+                var scroll = hit.gameObject.GetComponentInParent<ScrollRect>();
+                if (scroll != null && scroll.vertical)
                 {
-                    var scroll = hit.gameObject.GetComponentInParent<ScrollRect>();
-                    if (scroll != null && scroll.content != null)
-                    {
-                        var viewport = scroll.viewport != null ? scroll.viewport : (RectTransform)scroll.transform;
-                        float range = Mathf.Max(1f, scroll.content.rect.height - viewport.rect.height);
-                        scroll.verticalNormalizedPosition = Mathf.Clamp01(
-                            scroll.verticalNormalizedPosition + y * ScrollSpeed * Time.deltaTime / range);
-                    }
+                    scroll.movementType = ScrollRect.MovementType.Clamped;
+                    scroll.inertia = true;
+                    scroll.decelerationRate = 0.1f;
+                    if (Mathf.Abs(y) > 0.12f)
+                        scroll.velocity = new Vector2(scroll.velocity.x, -y * 4500f);
                 }
             }
         }
 
         private void HandleGaze(bool hasHit, RaycastResult hit)
         {
-            if (!hasHit)
-            {
-                _dwellTarget = null;
-                _dwellElapsed = 0f;
-                return;
-            }
-
-            if (KeyboardClick()) { Click(hit); return; }
-
-            if (hit.gameObject == _dwellTarget)
-            {
-                _dwellElapsed += Time.deltaTime;
-                if (_dwellElapsed >= DwellSeconds)
-                {
-                    Click(hit);
-                    _dwellElapsed = 0f;
-                }
-            }
-            else
-            {
-                _dwellTarget  = hit.gameObject;
-                _dwellElapsed = 0f;
-            }
+            _dwellTarget = null;
+            _dwellElapsed = 0f;
+            // Dwell clicks steal a scroll. The panel uses touch; VR uses the trigger.
+            if (hasHit && KeyboardClick()) Click(hit);
         }
 
         private void UpdateHover(GameObject target)

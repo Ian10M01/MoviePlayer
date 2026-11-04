@@ -1,6 +1,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.XR;
 
 namespace MoviePlayer.App
@@ -18,43 +19,17 @@ namespace MoviePlayer.App
         public float UiDrop     = 0.15f;   // slightly below eye level is more comfortable
 
         private readonly List<XRInputSubsystem> _subsystems = new List<XRInputSubsystem>();
+        bool _placed;
+        Coroutine _smooth;
 
         private IEnumerator Start()
         {
             yield return null;
             SubsystemManager.GetSubsystems(_subsystems);
-            foreach (var s in _subsystems)
-            {
-                s.trackingOriginUpdated -= OnTrackingOriginUpdated;
-                s.trackingOriginUpdated += OnTrackingOriginUpdated;
-            }
             FixCameraHeight();
 
-            // Give head tracking a moment to report a real pose before placing anything.
+            // One placement after tracking has a pose. Later recenters are the hold button only.
             yield return new WaitForSeconds(0.5f);
-            Recenter();
-        }
-
-        private void OnDestroy()
-        {
-            foreach (var s in _subsystems)
-                if (s != null) s.trackingOriginUpdated -= OnTrackingOriginUpdated;
-        }
-
-        private void OnApplicationFocus(bool hasFocus)
-        {
-            if (hasFocus && isActiveAndEnabled) StartCoroutine(RecenterNextFrame());
-        }
-
-        // Fired by the Quest's recenter (hold the Meta button / "Reset view").
-        private void OnTrackingOriginUpdated(XRInputSubsystem subsystem)
-        {
-            if (isActiveAndEnabled) StartCoroutine(RecenterNextFrame());
-        }
-
-        private IEnumerator RecenterNextFrame()
-        {
-            yield return null;
             Recenter();
         }
 
@@ -76,22 +51,94 @@ namespace MoviePlayer.App
 
         public void Recenter()
         {
-            var cam = Camera.main;
-            if (cam == null) return;
+            if (!TryTargets(out var contentPos, out var contentRot, out var uiPos, out var uiRot)) return;
+            if (!_placed)
+            {
+                Apply(contentPos, contentRot, uiPos, uiRot);
+                _placed = true;
+                return;
+            }
+            if (_smooth != null) StopCoroutine(_smooth);
+            _smooth = StartCoroutine(Smooth(contentPos, contentRot, uiPos, uiRot));
+        }
 
+        IEnumerator Smooth(Vector3 contentPos, Quaternion contentRot, Vector3 uiPos, Quaternion uiRot)
+        {
+            Vector3 fromPos = Content != null ? Content.position : contentPos;
+            Quaternion fromRot = Content != null ? Content.rotation : contentRot;
+            Vector3 fromUi = UiCanvas != null ? UiCanvas.position : uiPos;
+            Quaternion fromUiRot = UiCanvas != null ? UiCanvas.rotation : uiRot;
+            float t = 0f;
+            const float seconds = 0.35f;
+            while (t < seconds)
+            {
+                t += Time.deltaTime;
+                float k = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(t / seconds));
+                Apply(
+                    Vector3.Lerp(fromPos, contentPos, k),
+                    Quaternion.Slerp(fromRot, contentRot, k),
+                    Vector3.Lerp(fromUi, uiPos, k),
+                    Quaternion.Slerp(fromUiRot, uiRot, k));
+                yield return null;
+            }
+            Apply(contentPos, contentRot, uiPos, uiRot);
+            _smooth = null;
+        }
+
+        bool TryTargets(out Vector3 contentPos, out Quaternion contentRot, out Vector3 uiPos, out Quaternion uiRot)
+        {
+            contentPos = default;
+            contentRot = Quaternion.identity;
+            uiPos = default;
+            uiRot = Quaternion.identity;
+            var cam = Camera.main;
+            if (cam == null) return false;
             var head = cam.transform;
             Vector3 fwd = head.forward;
             fwd.y = 0f;
             if (fwd.sqrMagnitude < 1e-4f) fwd = Vector3.forward;
             fwd.Normalize();
             var yaw = Quaternion.LookRotation(fwd);
-
-            if (Content != null)
-                Content.SetPositionAndRotation(head.position, yaw);
-            if (UiCanvas != null)
-                UiCanvas.SetPositionAndRotation(head.position + fwd * UiDistance + Vector3.down * UiDrop, yaw);
-
+            contentPos = head.position;
+            contentRot = yaw;
+            uiPos = head.position + fwd * UiDistance + Vector3.down * UiDrop;
+            uiRot = yaw;
             Debug.Log($"[Recenter] head={head.position} yaw={yaw.eulerAngles.y:F0}");
+            return true;
+        }
+
+        void Apply(Vector3 contentPos, Quaternion contentRot, Vector3 uiPos, Quaternion uiRot)
+        {
+            if (Content != null) Content.SetPositionAndRotation(contentPos, contentRot);
+            if (UiCanvas != null) UiCanvas.SetPositionAndRotation(uiPos, uiRot);
+        }
+    }
+
+    /// <summary>Hold the button briefly. A tap does not snap the screen.</summary>
+    public class HoldToRecenter : MonoBehaviour, IPointerDownHandler, IPointerUpHandler
+    {
+        public ViewRecenter Target;
+        public float Seconds = 0.55f;
+        float _held;
+        bool _down;
+        bool _fired;
+
+        public void OnPointerDown(PointerEventData eventData)
+        {
+            _down = true;
+            _fired = false;
+            _held = 0f;
+        }
+
+        public void OnPointerUp(PointerEventData eventData) => _down = false;
+
+        void Update()
+        {
+            if (!_down || _fired) return;
+            _held += Time.unscaledDeltaTime;
+            if (_held < Seconds) return;
+            _fired = true;
+            Target?.Recenter();
         }
     }
 }

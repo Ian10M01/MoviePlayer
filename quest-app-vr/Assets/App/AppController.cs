@@ -74,7 +74,7 @@ namespace MoviePlayer.App
         [Header("Local Movies")]
         [Tooltip("Device folders scanned (recursively) for movies when no home node is configured. /sdcard covers all of the Quest's shared storage.")]
         public string[] LocalMovieFolders = { "/storage/emulated/0" };
-        static readonly string[] VideoExtensions = { ".mp4", ".mkv", ".webm", ".mov", ".m4v" };
+        static readonly string[] VideoExtensions = { ".mp4", ".mkv", ".webm", ".mov", ".m4v", ".3gp" };
         // App-private and system data: unreadable under scoped storage and slow to walk.
         static readonly string[] SkipDirNames = { "Android", ".thumbnails", ".trash" };
 
@@ -166,7 +166,9 @@ namespace MoviePlayer.App
                 StartDirectPlayback(
                     handoff.url,
                     (StereoScreenRenderer.StereoLayout)handoff.layout,
-                    (StereoScreenRenderer.ProjectionType)handoff.projection);
+                    (StereoScreenRenderer.ProjectionType)handoff.projection,
+                    handoff.eyeSwap != 0,
+                    true);
                 return;
             }
 
@@ -194,12 +196,14 @@ namespace MoviePlayer.App
         // Plays a single video URL with no server, auto-playing once prepared.
         private void StartDirectPlayback(string url,
             StereoScreenRenderer.StereoLayout layout = StereoScreenRenderer.StereoLayout.Mono,
-            StereoScreenRenderer.ProjectionType projection = StereoScreenRenderer.ProjectionType.Flat)
+            StereoScreenRenderer.ProjectionType projection = StereoScreenRenderer.ProjectionType.Flat,
+            bool eyeSwap = false,
+            bool lockChoice = false)
         {
             Debug.Log($"[App] Direct play → {url}  layout={layout}  projection={projection}");
             // Hide every panel: the watching panel is a dark overlay that would cover the screen.
             ShowPanel(null);
-            _controls?.BeginMovie(url, layout, projection);
+            _controls?.BeginMovie(url, layout, projection, lockChoice, eyeSwap);
             _friends?.Show(false);
             _watching = true;
             if (_room != null && _room.InRoom && _room.IsHost)
@@ -271,8 +275,12 @@ namespace MoviePlayer.App
             {
                 string path = file; // capture
                 _localFiles[System.IO.Path.GetFileName(path)] = path;
-                AddLibraryRow(System.IO.Path.GetFileNameWithoutExtension(path),
-                              () => StartDirectPlayback("file://" + path, GuessLayout(path), GuessProjection(path)));
+                string filePath = path;
+                AddLibraryRow(System.IO.Path.GetFileNameWithoutExtension(filePath), () =>
+                {
+                    var guess = StereoDetect.FromFilename(filePath);
+                    StartDirectPlayback(OnDeviceTranscoder.ToFileUrl(filePath), guess.Layout, guess.Projection, guess.EyeSwap);
+                });
             }
         }
 
@@ -282,6 +290,16 @@ namespace MoviePlayer.App
         private void FixLibraryMask()
         {
             var viewport = LibraryGrid.parent;
+            var scroll = viewport != null ? viewport.GetComponentInParent<ScrollRect>() : null;
+            if (scroll != null)
+            {
+                scroll.horizontal = false;
+                scroll.vertical = true;
+                scroll.movementType = ScrollRect.MovementType.Clamped;
+                scroll.inertia = true;
+                scroll.decelerationRate = 0.1f;
+                scroll.scrollSensitivity = 80f;
+            }
             if (viewport == null || viewport.GetComponent<RectMask2D>() != null) return;
             var mask = viewport.GetComponent<Mask>();
             if (mask != null) DestroyImmediate(mask);
@@ -316,7 +334,10 @@ namespace MoviePlayer.App
         private void OnRemoteMovie(string fileName)
         {
             if (_localFiles.TryGetValue(fileName, out var path))
-                StartDirectPlayback("file://" + path, GuessLayout(path), GuessProjection(path));
+            {
+                var guess = StereoDetect.FromFilename(path);
+                StartDirectPlayback(OnDeviceTranscoder.ToFileUrl(path), guess.Layout, guess.Projection, guess.EyeSwap);
+            }
             else
                 Debug.LogWarning($"[App] Friend is playing '{fileName}', which isn't on this Quest.");
         }
@@ -355,32 +376,6 @@ namespace MoviePlayer.App
 
             if (onClick != null)
                 row.AddComponent<Button>().onClick.AddListener(() => onClick());
-        }
-
-        // Picks a stereo layout from common filename tags (SBS / OU / LR / TB); defaults to 2D.
-        // The viewer can always override it in Settings, and the choice is remembered per movie.
-        private static StereoScreenRenderer.StereoLayout GuessLayout(string path)
-        {
-            string n = " " + System.IO.Path.GetFileNameWithoutExtension(path).ToUpperInvariant()
-                           .Replace('.', ' ').Replace('_', ' ').Replace('-', ' ').Replace('[', ' ').Replace(']', ' ') + " ";
-            bool vr = n.Contains(" 180 ") || n.Contains(" VR180 ") || n.Contains(" 360 ");
-            if (n.Contains(" FSBS ") || n.Contains(" FULL SBS ") || n.Contains(" FULLSBS ")) return StereoScreenRenderer.StereoLayout.FSBS;
-            if (n.Contains(" FOU ") || n.Contains(" FULL OU ") || n.Contains(" FULLOU ") || n.Contains(" FTAB ")) return StereoScreenRenderer.StereoLayout.FOU;
-            if (n.Contains(" HSBS ") || n.Contains(" SBS ") || n.Contains(" HALF SBS ")) return StereoScreenRenderer.StereoLayout.HSBS;
-            if (n.Contains(" HOU ") || n.Contains(" OU ") || n.Contains(" TAB ") || n.Contains(" HALF OU ")) return StereoScreenRenderer.StereoLayout.HOU;
-            if (n.Contains(" LR ")) return vr ? StereoScreenRenderer.StereoLayout.FSBS : StereoScreenRenderer.StereoLayout.HSBS;
-            if (n.Contains(" TB ")) return vr ? StereoScreenRenderer.StereoLayout.FOU : StereoScreenRenderer.StereoLayout.HOU;
-            if (n.Contains(" 3D ")) return StereoScreenRenderer.StereoLayout.HSBS;
-            return StereoScreenRenderer.StereoLayout.Mono;
-        }
-
-        private static StereoScreenRenderer.ProjectionType GuessProjection(string path)
-        {
-            string n = " " + System.IO.Path.GetFileNameWithoutExtension(path).ToUpperInvariant()
-                           .Replace('.', ' ').Replace('_', ' ').Replace('-', ' ') + " ";
-            if (n.Contains(" 360 ")) return StereoScreenRenderer.ProjectionType.Equirect360;
-            if (n.Contains(" 180 ") || n.Contains(" VR180 ")) return StereoScreenRenderer.ProjectionType.Equirect180;
-            return StereoScreenRenderer.ProjectionType.Flat;
         }
 
         #endregion

@@ -54,7 +54,13 @@ namespace MoviePlayer.Player
 
         int _prepareGen;
         Coroutine _prepareCo;
+        Coroutine _prepareWatch;
         string _sourceUrl = "";
+        string _filesystemPath = "";
+        OnDeviceTranscoder.ProbeResult _probe;
+        OnDeviceTranscoder.Plan _plan = OnDeviceTranscoder.Plan.Direct;
+        bool _retriedConvert;
+        const float PrepareTimeoutSec = 15f;
         long _resumeMs;
         int _sourceOrdinal = -1;
         readonly List<OnDeviceTranscoder.Choice> _choices = new List<OnDeviceTranscoder.Choice>();
@@ -67,6 +73,9 @@ namespace MoviePlayer.Player
         public IReadOnlyList<OnDeviceTranscoder.Choice> AudioChoices => _choices;
         public event Action OnAudioChoicesChanged;
         public event Action<string, float> OnPrepareProgress;
+        public event Action<OnDeviceTranscoder.ProbeResult> OnProbed;
+
+        public bool CapTextureToHd;
 
         // ── VideoPlayer backend ───────────────────────────────────────────────
         private VideoPlayer   _vp;
@@ -93,6 +102,11 @@ namespace MoviePlayer.Player
         public void Initialize(string hlsUrl, string bearerToken)
         {
             _sourceUrl = hlsUrl ?? "";
+            _filesystemPath = "";
+            _probe = null;
+            _plan = OnDeviceTranscoder.Plan.Direct;
+            _retriedConvert = false;
+            _handlingRetry = false;
             _prepareGen++;
             if (_prepareCo != null) { StopCoroutine(_prepareCo); _prepareCo = null; }
             OnDeviceTranscoder.Cancel();
@@ -146,7 +160,7 @@ namespace MoviePlayer.Player
         IEnumerator PrepareLocal(string url, int generation)
         {
             string path = OnDeviceTranscoder.ToFilesystemPath(url);
-            OnPrepareProgress?.Invoke("Preparing audio…", -1f);
+            _filesystemPath = path;
             string error = null;
             yield return OnDeviceTranscoder.EnsureBinary(e => error = e);
             if (generation != _prepareGen) yield break;
@@ -156,6 +170,8 @@ namespace MoviePlayer.Player
             yield return OnDeviceTranscoder.Probe(path, r => probe = r, e => error = e);
             if (generation != _prepareGen) yield break;
             if (probe == null) { OnError?.Invoke(error ?? "Could not read the file."); yield break; }
+            _probe = probe;
+            OnProbed?.Invoke(probe);
 
             int ordinal = _preferTrack >= 0 && (probe.Audio.Count == 0 || _preferTrack < probe.Audio.Count)
                 ? _preferTrack
@@ -186,11 +202,34 @@ namespace MoviePlayer.Player
             if (generation != _prepareGen) yield break;
             if (string.IsNullOrEmpty(playable)) { OnError?.Invoke(error ?? "Could not prepare playback."); yield break; }
 
+            _plan = OnDeviceTranscoder.ChoosePlan(path, probe, probe.Audio.Count > 0 ? ordinal : -1);
             _preferTrack = string.Equals(playable.Replace('\\', '/'), path.Replace('\\', '/'), StringComparison.OrdinalIgnoreCase)
                 ? ordinal
                 : 0;
-            string playUrl = playable.Contains("://") ? playable : "file://" + playable;
-            InitVideoPlayer(playUrl);
+            InitVideoPlayer(OnDeviceTranscoder.ToFileUrl(playable));
+        }
+
+        IEnumerator ConvertAndPlay(OnDeviceTranscoder.Plan plan, int generation)
+        {
+            _plan = plan;
+            string error = null;
+            string playable = null;
+            int ordinal = _probe != null && _probe.Audio.Count > 0 ? _sourceOrdinal : -1;
+            yield return OnDeviceTranscoder.PreparePlayback(
+                _filesystemPath, _probe, ordinal,
+                (msg, p) => { if (generation == _prepareGen) OnPrepareProgress?.Invoke(msg, p); },
+                u => playable = u,
+                e => error = e,
+                () => generation != _prepareGen,
+                plan);
+            if (generation != _prepareGen) yield break;
+            if (string.IsNullOrEmpty(playable))
+            {
+                OnError?.Invoke(error ?? "Could not prepare playback.");
+                yield break;
+            }
+            _preferTrack = 0;
+            InitVideoPlayer(OnDeviceTranscoder.ToFileUrl(playable));
         }
 
         public void Play()
@@ -374,12 +413,16 @@ namespace MoviePlayer.Player
 
         void InitVideoPlayer(string url)
         {
+            url = OnDeviceTranscoder.EscapeFileUrl(url);
+            if (_prepareWatch != null) { StopCoroutine(_prepareWatch); _prepareWatch = null; }
+
             // Clean up previous instance
             if (_vp != null) { _vp.Stop(); Destroy(_vp); }
             if (_rt != null) { _rt.Release(); Destroy(_rt); }
 
-            // RenderTexture — actual size set in prepareCompleted once video metadata known
-            _rt = new RenderTexture(3840, 2160, 0, RenderTextureFormat.ARGB32);
+            // The 2D panel is 1280x800. Never allocate a 4K target for it.
+            // Theater may grow up to 3840x2160 once the real frame size is known.
+            _rt = new RenderTexture(1280, 720, 0, RenderTextureFormat.ARGB32);
             _rt.name = "VideoRT";
             _rt.Create();
 
@@ -399,6 +442,7 @@ namespace MoviePlayer.Player
 
             _vp.waitForFirstFrame = true;
             _vp.skipOnDrop        = true;
+            _vp.timeUpdateMode    = VideoTimeUpdateMode.UnscaledGameTime;
             _vp.isLooping         = false;
 
             // Subscribe to events
@@ -412,6 +456,56 @@ namespace MoviePlayer.Player
 
             _vp.Prepare();
             Debug.Log("[HLS] VideoPlayer Prepare() called.");
+            if (OnDeviceTranscoder.IsLocalFile(url) || !string.IsNullOrEmpty(_filesystemPath))
+                _prepareWatch = StartCoroutine(WatchPrepare(_prepareGen));
+        }
+
+        IEnumerator WatchPrepare(int generation)
+        {
+            float deadline = Time.unscaledTime + PrepareTimeoutSec;
+            while (Time.unscaledTime < deadline)
+            {
+                if (generation != _prepareGen || _vpReady || _vp == null) yield break;
+                yield return null;
+            }
+            if (generation != _prepareGen || _vpReady) yield break;
+            Debug.LogError("[HLS] VideoPlayer Prepare() timed out");
+            BeginConvertRetry("Prepare timed out");
+        }
+
+        bool _handlingRetry;
+
+        void BeginConvertRetry(string message)
+        {
+            if (_handlingRetry) return;
+            _handlingRetry = true;
+            Debug.LogError("[HLS] VideoPlayer error: " + message);
+            bool local = _probe != null && !string.IsNullOrEmpty(_filesystemPath) && OnDeviceTranscoder.OnQuest;
+            if (!local || _retriedConvert || _plan == OnDeviceTranscoder.Plan.Full)
+            {
+                _handlingRetry = false;
+                OnError?.Invoke(message);
+                return;
+            }
+            _retriedConvert = true;
+            var next = OnDeviceTranscoder.FallbackPlan(_plan, _filesystemPath, _probe);
+            Debug.Log("[compat] playback failed (" + message + ") retry " + next);
+            _prepareGen++;
+            if (_prepareCo != null) StopCoroutine(_prepareCo);
+            if (_prepareWatch != null) { StopCoroutine(_prepareWatch); _prepareWatch = null; }
+            OnDeviceTranscoder.Cancel();
+            if (_vp != null)
+            {
+                _vp.prepareCompleted -= OnVpPrepared;
+                _vp.errorReceived -= OnVpError;
+                _vp.Stop();
+                Destroy(_vp);
+                _vp = null;
+            }
+            _vpReady = false;
+            IsReady = false;
+            _prepareCo = StartCoroutine(ConvertAndPlay(next, _prepareGen));
+            _handlingRetry = false;
         }
 
         void OnVpPrepared(VideoPlayer vp)
@@ -419,17 +513,23 @@ namespace MoviePlayer.Player
             Debug.Log($"[HLS] VideoPlayer prepared: {vp.width}x{vp.height}  " +
                       $"duration={vp.length:F1}s  frameRate={vp.frameRate:F1}");
 
-            // Resize RT to actual video dimensions if needed
-            if (vp.width > 0 && vp.height > 0 &&
-                (_rt.width != (int)vp.width || _rt.height != (int)vp.height))
+            if (_prepareWatch != null) { StopCoroutine(_prepareWatch); _prepareWatch = null; }
+
+            if (vp.width > 0 && vp.height > 0)
             {
-                _rt.Release();
-                _rt.width  = (int)vp.width;
-                _rt.height = (int)vp.height;
-                _rt.Create();
-                vp.targetTexture = _rt;
-                ApplyRenderTexture(_rt);
-                Debug.Log($"[HLS] RT resized to {_rt.width}x{_rt.height}");
+                int maxW = CapTextureToHd ? 1920 : 3840;
+                int maxH = CapTextureToHd ? 1080 : 2160;
+                FitSize((int)vp.width, (int)vp.height, maxW, maxH, out int rw, out int rh);
+                if (_rt.width != rw || _rt.height != rh)
+                {
+                    _rt.Release();
+                    _rt.width = rw;
+                    _rt.height = rh;
+                    _rt.Create();
+                    vp.targetTexture = _rt;
+                    ApplyRenderTexture(_rt);
+                    Debug.Log($"[HLS] RT resized to {_rt.width}x{_rt.height}");
+                }
             }
 
             if (ScreenRenderer != null && vp.width > 0 && vp.height > 0)
@@ -442,8 +542,15 @@ namespace MoviePlayer.Player
 
         void OnVpError(VideoPlayer vp, string message)
         {
-            Debug.LogError($"[HLS] VideoPlayer error: {message}");
-            OnError?.Invoke(message);
+            BeginConvertRetry(string.IsNullOrEmpty(message) ? "VideoPlayer error" : message);
+        }
+
+        static void FitSize(int width, int height, int maxW, int maxH, out int rw, out int rh)
+        {
+            if (width <= 0 || height <= 0) { rw = Math.Min(1280, maxW); rh = Math.Min(720, maxH); return; }
+            float scale = Mathf.Min(1f, maxW / (float)width, maxH / (float)height);
+            rw = Math.Max(16, (int)(width * scale)) & ~1;
+            rh = Math.Max(16, (int)(height * scale)) & ~1;
         }
 
         void ApplyRenderTexture(RenderTexture rt)

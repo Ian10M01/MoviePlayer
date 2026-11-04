@@ -9,9 +9,12 @@ using UnityEngine.Networking;
 using UnityEngine.Rendering;
 using UnityEngine.Rendering.Universal;
 using UnityEngine.SceneManagement;
+using UnityEngine.InputSystem;
 using UnityEngine.UI;
 using MoviePlayer.Player;
 using MoviePlayer.Proto;
+using Layout = MoviePlayer.Player.StereoScreenRenderer.StereoLayout;
+using Projection = MoviePlayer.Player.StereoScreenRenderer.ProjectionType;
 
 namespace MoviePlayer.App
 {
@@ -23,10 +26,20 @@ namespace MoviePlayer.App
     /// </summary>
     public class PanelPlayer : MonoBehaviour
     {
-        enum ViewMode { Mono, Left, Right, Sbs, Ou, Anaglyph }
-        enum Packing { Sbs, Ou }
+        enum ViewMode { Mono, Left, Right, Sbs, Anaglyph }
 
-        static readonly string[] VideoExtensions = { ".mp4", ".mkv", ".webm", ".mov", ".m4v" };
+        static readonly string[] VideoExtensions = { ".mp4", ".mkv", ".webm", ".mov", ".m4v", ".3gp" };
+        static readonly (Layout layout, Projection projection)[] LayoutCycle =
+        {
+            (Layout.Mono, Projection.Flat),
+            (Layout.HSBS, Projection.Flat),
+            (Layout.FSBS, Projection.Flat),
+            (Layout.HOU, Projection.Flat),
+            (Layout.FOU, Projection.Flat),
+            (Layout.HSBS, Projection.Equirect180),
+            (Layout.Mono, Projection.Equirect180),
+            (Layout.Mono, Projection.Equirect360),
+        };
         static readonly string[] SkipDirNames = { "Android", ".thumbnails", ".trash" };
         static readonly Color Accent = new Color(0.298f, 0.553f, 1f, 1f);
         static readonly Color Bar = new Color(0.08f, 0.09f, 0.11f, 0.94f);
@@ -38,20 +51,31 @@ namespace MoviePlayer.App
         AspectRatioFitter _fit;
         Material _anaglyph;
         Text _status;
+        Text _hint;
+        Text _layoutLabel;
         Text _audio;
         Text _time;
         Text _playLabel;
+        Image _swapButton;
         Slider _seek;
         InputField _urlField;
         RectTransform _listContent;
         RectTransform _langRoot;
         GameObject _listRoot;
+        ScrollRect _libraryScroll;
         bool _seeking;
         bool _built;
         string _url = "";
+        MediaManifest _manifest;
         ViewMode _mode = ViewMode.Mono;
-        Packing _pack = Packing.Sbs;
+        Layout _layout = Layout.Mono;
+        Projection _projection = Projection.Flat;
+        bool _eyeSwap;
+        bool _userLocked;
+        string _appliedKey = "";
         readonly Dictionary<ViewMode, Image> _modeButtons = new Dictionary<ViewMode, Image>();
+        InputAction _leftStick;
+        InputAction _rightStick;
 
         [Serializable] class LibraryResponse { public MediaManifest[] items; }
 
@@ -65,6 +89,10 @@ namespace MoviePlayer.App
             _player.OnAudioChoicesChanged += ShowLanguages;
             _player.OnPrepareProgress += OnPrepare;
             _player.OnError += OnVideoError;
+            _player.OnProbed += OnProbed;
+            _player.CapTextureToHd = true;
+            _leftStick = MakeStick("LeftHand");
+            _rightStick = MakeStick("RightHand");
             _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
             if (_font == null)
             {
@@ -235,8 +263,19 @@ namespace MoviePlayer.App
                 _player.OnAudioChoicesChanged -= ShowLanguages;
                 _player.OnPrepareProgress -= OnPrepare;
                 _player.OnError -= OnVideoError;
+                _player.OnProbed -= OnProbed;
             }
+            if (_leftStick != null) { _leftStick.Disable(); _leftStick.Dispose(); }
+            if (_rightStick != null) { _rightStick.Disable(); _rightStick.Dispose(); }
             if (_anaglyph != null) Destroy(_anaglyph);
+        }
+
+        static InputAction MakeStick(string hand)
+        {
+            var action = new InputAction("Stick " + hand, InputActionType.Value,
+                "<XRController>{" + hand + "}/{Primary2DAxis}", expectedControlType: "Vector2");
+            action.Enable();
+            return action;
         }
 
         void Update()
@@ -250,10 +289,26 @@ namespace MoviePlayer.App
                 _seek.SetValueWithoutNotify(Mathf.Clamp01((float)pos / dur));
             if (_playLabel != null)
                 _playLabel.text = _player.IsPlaying ? "Pause" : "Play";
+            ScrollFromStick();
+        }
+
+        void ScrollFromStick()
+        {
+            if (_libraryScroll == null || _listRoot == null || !_listRoot.activeInHierarchy) return;
+            Vector2 left = _leftStick != null ? _leftStick.ReadValue<Vector2>() : Vector2.zero;
+            Vector2 right = _rightStick != null ? _rightStick.ReadValue<Vector2>() : Vector2.zero;
+            Vector2 stick = left.sqrMagnitude >= right.sqrMagnitude ? left : right;
+            if (Mathf.Abs(stick.y) < 0.15f) return;
+            _libraryScroll.velocity = new Vector2(0f, -stick.y * 4500f);
         }
 
         void OnVideoReady()
         {
+            if (!_userLocked && _appliedKey == "default" && _player.VideoWidth > 0)
+            {
+                var aspect = StereoDetect.FromAspect(_player.VideoWidth, _player.VideoHeight);
+                if (aspect.Locked) ApplyDetected(aspect, true);
+            }
             if (_video != null)
             {
                 _video.texture = _player.VideoTexture;
@@ -270,16 +325,90 @@ namespace MoviePlayer.App
             if (_status != null) _status.color = Warn;
         }
 
-        void PlayUrl(string url, string label)
+        void PlayUrl(string url, string label, MediaManifest manifest = null)
         {
             if (string.IsNullOrWhiteSpace(url) || _player == null) return;
             _url = url.Trim();
+            if (_url.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+                _url = OnDeviceTranscoder.ToFileUrl(_url);
+            _manifest = manifest;
+            _userLocked = false;
+            _appliedKey = "";
+            LoadUserLayout();
+            if (!_userLocked)
+                ApplyDetected(StereoDetect.Resolve(_url, _manifest, null), true);
             _player.PreferAudioTrack(-1);
             _player.Initialize(_url, PlayerPrefs.GetString("authToken", ""));
             if (_video != null) _video.texture = _player.VideoTexture;
             ShowList(false);
             SetStatus("Opening " + (string.IsNullOrEmpty(label) ? _url : label));
             ApplyView();
+        }
+
+        void OnProbed(OnDeviceTranscoder.ProbeResult probe)
+        {
+            if (_userLocked || probe == null) return;
+            ApplyDetected(StereoDetect.Resolve(_url, _manifest, probe), true);
+        }
+
+        void LoadUserLayout()
+        {
+            string key = LayoutKey();
+            if (!PlayerPrefs.HasKey("stereo.user:" + key)) return;
+            _userLocked = true;
+            _layout = (Layout)PlayerPrefs.GetInt("stereo.layout:" + key, (int)Layout.Mono);
+            _projection = (Projection)PlayerPrefs.GetInt("stereo.proj:" + key, (int)Projection.Flat);
+            _eyeSwap = PlayerPrefs.GetInt("stereo.swap:" + key, 0) != 0;
+            _mode = (ViewMode)PlayerPrefs.GetInt("stereo.view:" + key, (int)ViewMode.Mono);
+            _appliedKey = "user";
+            StereoDetect.Log(new StereoGuess
+            {
+                Layout = _layout,
+                Projection = _projection,
+                EyeSwap = _eyeSwap,
+                Source = "user"
+            });
+            ApplyView();
+        }
+
+        void ApplyDetected(StereoGuess guess, bool resetView)
+        {
+            string key = guess.Source + ":" + guess.Layout + ":" + guess.Projection + ":" + guess.EyeSwap;
+            if (_appliedKey == key) return;
+            _layout = guess.Layout;
+            _projection = guess.Projection;
+            _eyeSwap = guess.EyeSwap;
+            _appliedKey = key;
+            if (resetView)
+            {
+                if (guess.Projection != Projection.Flat)
+                    _mode = ViewMode.Mono;
+                else if (guess.Layout != Layout.Mono)
+                    _mode = ViewMode.Anaglyph;
+                else
+                    _mode = ViewMode.Mono;
+            }
+            StereoDetect.Log(guess);
+            ApplyView();
+        }
+
+        string LayoutKey()
+        {
+            string name;
+            try { name = Path.GetFileNameWithoutExtension(Uri.UnescapeDataString(_url ?? "")); }
+            catch { name = Path.GetFileNameWithoutExtension(_url ?? ""); }
+            return name ?? "";
+        }
+
+        void RememberLayout()
+        {
+            string key = LayoutKey();
+            PlayerPrefs.SetInt("stereo.user:" + key, 1);
+            PlayerPrefs.SetInt("stereo.layout:" + key, (int)_layout);
+            PlayerPrefs.SetInt("stereo.proj:" + key, (int)_projection);
+            PlayerPrefs.SetInt("stereo.swap:" + key, _eyeSwap ? 1 : 0);
+            PlayerPrefs.SetInt("stereo.view:" + key, (int)_mode);
+            PlayerPrefs.Save();
         }
 
         void OnOpenClicked()
@@ -337,7 +466,7 @@ namespace MoviePlayer.App
                 var manifest = item;
                 string hls = manifest.hls_path ?? "";
                 string absolute = hls.StartsWith("http") ? hls : baseUrl + "/" + hls.TrimStart('/');
-                AddListRow(manifest.filename, () => PlayUrl(absolute, manifest.filename));
+                AddListRow(manifest.filename, () => PlayUrl(absolute, manifest.filename, manifest));
             }
             ShowList(true);
             SetStatus(items.Length + " movie(s)");
@@ -373,7 +502,7 @@ namespace MoviePlayer.App
             foreach (var file in files)
             {
                 string path = file;
-                AddListRow(Path.GetFileNameWithoutExtension(path), () => PlayUrl("file://" + path, Path.GetFileName(path)));
+                AddListRow(Path.GetFileNameWithoutExtension(path), () => PlayUrl(OnDeviceTranscoder.ToFileUrl(path), Path.GetFileName(path)));
             }
             ShowList(true);
             SetStatus(files.Count + " movie(s) on this Quest");
@@ -402,7 +531,7 @@ namespace MoviePlayer.App
             }
             int layout = (int)VrLayout();
             int projection = (int)VrProjection();
-            PlaybackHandoff.Write(_url, _player.GetPositionMs(), layout, projection, _player.SelectedSourceOrdinal);
+            PlaybackHandoff.Write(_url, _player.GetPositionMs(), layout, projection, _player.SelectedSourceOrdinal, _eyeSwap);
             _player.CancelPrepare();
             SetStatus("Opening VR theater…");
             if (!TheaterLaunch.TryStart())
@@ -415,45 +544,98 @@ namespace MoviePlayer.App
             SceneManager.LoadScene("MainScene");
         }
 
-        StereoScreenRenderer.StereoLayout VrLayout()
-        {
-            string name = " " + Path.GetFileNameWithoutExtension(Uri.UnescapeDataString(_url ?? "")).ToUpperInvariant()
-                .Replace('_', ' ').Replace('-', ' ').Replace('.', ' ') + " ";
-            bool full = name.Contains(" FULL ") || name.Contains(" FSBS ") || name.Contains(" FOU ");
-            if (_mode == ViewMode.Mono) return StereoScreenRenderer.StereoLayout.Mono;
-            if (_pack == Packing.Ou)
-                return full ? StereoScreenRenderer.StereoLayout.FOU : StereoScreenRenderer.StereoLayout.HOU;
-            return full ? StereoScreenRenderer.StereoLayout.FSBS : StereoScreenRenderer.StereoLayout.HSBS;
-        }
+        Layout VrLayout() => _layout;
 
-        StereoScreenRenderer.ProjectionType VrProjection()
-        {
-            string name = " " + Path.GetFileNameWithoutExtension(_url ?? "").ToUpperInvariant().Replace('_', ' ') + " ";
-            if (name.Contains(" 360 ")) return StereoScreenRenderer.ProjectionType.Equirect360;
-            if (name.Contains(" 180 ") || name.Contains(" VR180 ")) return StereoScreenRenderer.ProjectionType.Equirect180;
-            return StereoScreenRenderer.ProjectionType.Flat;
-        }
+        Projection VrProjection() => _projection;
 
         void SetMode(ViewMode mode)
         {
             _mode = mode;
-            if (mode == ViewMode.Ou) _pack = Packing.Ou;
-            else if (mode == ViewMode.Sbs || mode == ViewMode.Mono) _pack = Packing.Sbs;
+            _userLocked = true;
+            RememberLayout();
+            ApplyView();
+        }
+
+        void StepLayout(int direction)
+        {
+            int index = 0;
+            for (int i = 0; i < LayoutCycle.Length; i++)
+            {
+                if (LayoutCycle[i].layout == _layout && LayoutCycle[i].projection == _projection)
+                {
+                    index = i;
+                    break;
+                }
+            }
+            index = (index + direction + LayoutCycle.Length) % LayoutCycle.Length;
+            _layout = LayoutCycle[index].layout;
+            _projection = LayoutCycle[index].projection;
+            _userLocked = true;
+            _appliedKey = "user";
+            if (_projection != Projection.Flat) _mode = ViewMode.Mono;
+            else if (_layout != Layout.Mono && _mode == ViewMode.Mono) _mode = ViewMode.Anaglyph;
+            RememberLayout();
+            StereoDetect.Log(new StereoGuess
+            {
+                Layout = _layout,
+                Projection = _projection,
+                EyeSwap = _eyeSwap,
+                Source = "user"
+            });
+            ApplyView();
+        }
+
+        void ToggleSwap()
+        {
+            _eyeSwap = !_eyeSwap;
+            _userLocked = true;
+            RememberLayout();
+            StereoDetect.Log(new StereoGuess
+            {
+                Layout = _layout,
+                Projection = _projection,
+                EyeSwap = _eyeSwap,
+                Source = "user"
+            });
             ApplyView();
         }
 
         void ApplyView()
         {
+            if (_layoutLabel != null) _layoutLabel.text = LayoutCaption();
+            if (_hint != null)
+            {
+                bool vr = _projection != Projection.Flat;
+                _hint.text = vr ? "Open VR theater to look around in 180/360" : "";
+            }
+            if (_swapButton != null)
+                _swapButton.color = _eyeSwap ? Accent : new Color(0.22f, 0.25f, 0.32f, 1f);
             if (_video == null) return;
             bool anaglyph = _mode == ViewMode.Anaglyph && _anaglyph != null;
+            bool oneEye = _mode == ViewMode.Left || _mode == ViewMode.Right;
             _video.material = anaglyph ? _anaglyph : null;
-            _video.uvRect = Uv(_mode, _pack);
+            _video.uvRect = oneEye
+                ? StereoDetect.EyeRect(_layout, _mode == ViewMode.Left, _eyeSwap)
+                : new Rect(0f, 0f, 1f, 1f);
             if (anaglyph)
-                _anaglyph.SetFloat("_Pack", _pack == Packing.Ou ? 1f : 0f);
+            {
+                bool overUnder = _layout == Layout.HOU || _layout == Layout.FOU;
+                float pack = _layout == Layout.Mono ? -1f : (overUnder ? 1f : 0f);
+                _anaglyph.SetFloat("_Pack", pack);
+                _anaglyph.SetFloat("_Swap", _eyeSwap ? 1f : 0f);
+            }
             if (_fit != null)
                 _fit.aspectRatio = DisplayAspect();
             foreach (var pair in _modeButtons)
                 pair.Value.color = pair.Key == _mode ? Accent : new Color(1f, 1f, 1f, 0.12f);
+        }
+
+        string LayoutCaption()
+        {
+            string name = _layout.ToString();
+            if (_projection == Projection.Equirect180) return _layout == Layout.Mono ? "180" : "180 " + name;
+            if (_projection == Projection.Equirect360) return _layout == Layout.Mono ? "360" : "360 " + name;
+            return name;
         }
 
         float DisplayAspect()
@@ -461,18 +643,8 @@ namespace MoviePlayer.App
             float aspect = 16f / 9f;
             if (_player != null && _player.VideoWidth > 0 && _player.VideoHeight > 0)
                 aspect = (float)_player.VideoWidth / _player.VideoHeight;
-            if (_mode == ViewMode.Left || _mode == ViewMode.Right || _mode == ViewMode.Anaglyph)
-                aspect = _pack == Packing.Ou ? aspect * 2f : aspect * 0.5f;
-            return Mathf.Max(0.2f, aspect);
-        }
-
-        static Rect Uv(ViewMode mode, Packing pack)
-        {
-            bool eye = mode == ViewMode.Left || mode == ViewMode.Right;
-            if (!eye) return new Rect(0f, 0f, 1f, 1f);
-            if (pack == Packing.Ou)
-                return mode == ViewMode.Left ? new Rect(0f, 0.5f, 1f, 0.5f) : new Rect(0f, 0f, 1f, 0.5f);
-            return mode == ViewMode.Left ? new Rect(0f, 0f, 0.5f, 1f) : new Rect(0.5f, 0f, 0.5f, 1f);
+            bool oneEye = _mode == ViewMode.Left || _mode == ViewMode.Right || _mode == ViewMode.Anaglyph;
+            return Mathf.Max(0.2f, StereoDetect.EyeAspect(aspect, _layout, oneEye));
         }
 
         void TogglePlay()
@@ -538,6 +710,8 @@ namespace MoviePlayer.App
         void ShowList(bool show)
         {
             if (_listRoot != null) _listRoot.SetActive(show);
+            if (show && _listContent != null)
+                LayoutRebuilder.ForceRebuildLayoutImmediate(_listContent);
         }
 
         void ClearList()
@@ -732,6 +906,16 @@ namespace MoviePlayer.App
             using var scaleType = new AndroidJavaClass("android.widget.ImageView$ScaleType");
             using var fit = scaleType.GetStatic<AndroidJavaObject>("FIT_XY");
             _preview.Call("setScaleType", fit);
+            try
+            {
+                _preview.Call("setClickable", false);
+                _preview.Call("setFocusable", false);
+                _preview.Call("setFocusableInTouchMode", false);
+            }
+            catch (Exception touch)
+            {
+                Debug.LogWarning("[App] Preview touch passthrough: " + touch.Message);
+            }
             using var lp = new AndroidJavaObject("android.widget.FrameLayout$LayoutParams", -1, -1);
             content.Call("addView", _preview, lp);
         }
@@ -883,24 +1067,40 @@ namespace MoviePlayer.App
             MakeButton(top, "Open", new Vector2(-250f, 0f), new Vector2(220f, 72f), OnOpenClicked, false);
             MakeButton(top, "Choose video", new Vector2(-16f, 0f), new Vector2(220f, 72f), () => StartCoroutine(ScanLocal()), true);
 
-            var bottom = Band(root, "Bottom", 0f, 0f, 1f, 0f, Vector2.zero, new Vector2(0f, 300f));
+            var bottom = Band(root, "Bottom", 0f, 0f, 1f, 0f, Vector2.zero, new Vector2(0f, 430f));
             bottom.GetComponent<Image>().color = Bar;
 
-            var modes = Child(bottom, "Modes", new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(0f, -8f), new Vector2(1600f, 64f));
-            float x = -750f;
-            x = ModeButton(modes, "Mono", ViewMode.Mono, x);
-            x = ModeButton(modes, "Left eye", ViewMode.Left, x);
-            x = ModeButton(modes, "Right eye", ViewMode.Right, x);
-            x = ModeButton(modes, "SBS", ViewMode.Sbs, x);
-            x = ModeButton(modes, "OU", ViewMode.Ou, x);
-            ModeButton(modes, "Anaglyph", ViewMode.Anaglyph, x);
+            var layouts = Child(bottom, "Layouts", new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(0f, -52f), new Vector2(0f, 96f));
+            var prev = MakeButton(layouts, "Prev layout", new Vector2(16f, 0f), new Vector2(420f, 84f), () => StepLayout(-1), false);
+            prev.anchorMin = prev.anchorMax = new Vector2(0f, 0.5f);
+            prev.pivot = new Vector2(0f, 0.5f);
+            prev.anchoredPosition = new Vector2(16f, 0f);
+            var next = MakeButton(layouts, "Next layout", new Vector2(-16f, 0f), new Vector2(420f, 84f), () => StepLayout(1), false);
+            next.anchorMin = next.anchorMax = new Vector2(1f, 0.5f);
+            next.pivot = new Vector2(1f, 0.5f);
+            next.anchoredPosition = new Vector2(-16f, 0f);
+            _layoutLabel = MakeText(layouts, "Mono", 32, TextAnchor.MiddleCenter, false);
+            _layoutLabel.fontStyle = FontStyle.Bold;
+            var swap = MakeButton(layouts, "Swap eyes", new Vector2(0f, 0f), new Vector2(240f, 84f), ToggleSwap, false);
+            swap.anchorMin = swap.anchorMax = new Vector2(0.5f, 0.5f);
+            swap.pivot = new Vector2(0.5f, 0.5f);
+            swap.anchoredPosition = new Vector2(280f, 0f);
+            _swapButton = swap.GetComponent<Image>();
+
+            var present = Child(bottom, "Present", new Vector2(0.5f, 1f), new Vector2(0.5f, 1f), new Vector2(0f, -148f), new Vector2(1680f, 76f));
+            float x = -800f;
+            x = ModeButton(present, "Mono", ViewMode.Mono, x);
+            x = ModeButton(present, "Left", ViewMode.Left, x);
+            x = ModeButton(present, "Right", ViewMode.Right, x);
+            x = ModeButton(present, "SBS", ViewMode.Sbs, x);
+            ModeButton(present, "Anaglyph", ViewMode.Anaglyph, x);
 
             _audio = MakeText(bottom, "Language", 26, TextAnchor.MiddleLeft, false);
-            Place(_audio.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(24f, -148f), new Vector2(220f, -84f));
+            Place(_audio.rectTransform, new Vector2(0f, 1f), new Vector2(0f, 1f), new Vector2(24f, -268f), new Vector2(220f, -204f));
             var langGo = new GameObject("Languages", typeof(RectTransform), typeof(HorizontalLayoutGroup));
             langGo.transform.SetParent(bottom, false);
             _langRoot = (RectTransform)langGo.transform;
-            Place(_langRoot, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(230f, -156f), new Vector2(-16f, -84f));
+            Place(_langRoot, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(230f, -272f), new Vector2(-16f, -200f));
             var langLayout = langGo.GetComponent<HorizontalLayoutGroup>();
             langLayout.spacing = 8f;
             langLayout.childAlignment = TextAnchor.MiddleLeft;
@@ -923,15 +1123,18 @@ namespace MoviePlayer.App
             theater.pivot = new Vector2(0.5f, 0f);
 
             _status = MakeText(root, "", 24, TextAnchor.MiddleLeft, false);
-            Place(_status.rectTransform, new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(24f, 300f), new Vector2(-24f, 348f));
+            Place(_status.rectTransform, new Vector2(0f, 0f), new Vector2(1f, 0f), new Vector2(24f, 430f), new Vector2(-24f, 470f));
             _status.color = Color.white;
+            _hint = MakeText(root, "", 22, TextAnchor.MiddleRight, false);
+            Place(_hint.rectTransform, new Vector2(0.4f, 0f), new Vector2(1f, 0f), new Vector2(0f, 430f), new Vector2(-24f, 470f));
+            _hint.color = Warn;
 
             var videoGo = new GameObject("Video", typeof(RectTransform), typeof(RawImage), typeof(AspectRatioFitter));
             videoGo.transform.SetParent(root, false);
             var vrt = (RectTransform)videoGo.transform;
             vrt.anchorMin = Vector2.zero;
             vrt.anchorMax = Vector2.one;
-            vrt.offsetMin = new Vector2(24f, 360f);
+            vrt.offsetMin = new Vector2(24f, 490f);
             vrt.offsetMax = new Vector2(-24f, -112f);
             _video = videoGo.GetComponent<RawImage>();
             _video.color = new Color(1f, 1f, 1f, 0f);
@@ -945,7 +1148,7 @@ namespace MoviePlayer.App
             var lrt = (RectTransform)_listRoot.transform;
             lrt.anchorMin = Vector2.zero;
             lrt.anchorMax = Vector2.one;
-            lrt.offsetMin = new Vector2(24f, 360f);
+            lrt.offsetMin = new Vector2(24f, 490f);
             lrt.offsetMax = new Vector2(-24f, -112f);
             _listRoot.GetComponent<Image>().color = new Color(0.05f, 0.055f, 0.065f, 0.96f);
             BuildScroll(_listRoot.transform);
@@ -990,7 +1193,13 @@ namespace MoviePlayer.App
             Stretch((RectTransform)scrollGo.transform);
             scrollGo.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0f);
             var scroll = scrollGo.GetComponent<ScrollRect>();
+            _libraryScroll = scroll;
             scroll.horizontal = false;
+            scroll.vertical = true;
+            scroll.movementType = ScrollRect.MovementType.Clamped;
+            scroll.inertia = true;
+            scroll.decelerationRate = 0.1f;
+            scroll.scrollSensitivity = 80f;
 
             var viewport = new GameObject("Viewport", typeof(RectTransform), typeof(Image), typeof(RectMask2D));
             viewport.transform.SetParent(scrollGo.transform, false);
@@ -1012,7 +1221,9 @@ namespace MoviePlayer.App
             layout.childForceExpandHeight = false;
             layout.spacing = 8f;
             layout.padding = new RectOffset(12, 12, 12, 12);
-            content.GetComponent<ContentSizeFitter>().verticalFit = ContentSizeFitter.FitMode.PreferredSize;
+            var fitter = content.GetComponent<ContentSizeFitter>();
+            fitter.horizontalFit = ContentSizeFitter.FitMode.Unconstrained;
+            fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
             scroll.viewport = (RectTransform)viewport.transform;
             scroll.content = _listContent;
         }

@@ -52,6 +52,8 @@ namespace MoviePlayer.App
         private bool       _paused, _visible;
         private float      _hideAt;
         private string     _movieKey = "";
+        private string     _moviePath = "";
+        private bool       _userPicked;
 
         bool _preparing;
         string _prepareText = "";
@@ -82,13 +84,40 @@ namespace MoviePlayer.App
         }
 
         /// <summary>Shows the controls for a newly started movie and applies its 3D mode.</summary>
-        public void BeginMovie(string path, Layout guessedLayout, Projection guessedProjection)
+        public void BeginMovie(string path, Layout guessedLayout, Projection guessedProjection, bool lockChoice = false, bool eyeSwap = false)
         {
+            _moviePath = path ?? "";
             _movieKey = string.IsNullOrEmpty(path) ? "" : System.IO.Path.GetFileName(path);
-            var layout = (Layout)PlayerPrefs.GetInt("layout:" + _movieKey, (int)guessedLayout);
-            var proj   = (Projection)PlayerPrefs.GetInt("proj:" + _movieKey, (int)guessedProjection);
-            bool swap  = PlayerPrefs.GetInt("swap:" + _movieKey, 0) == 1;
+            _userPicked = lockChoice || PlayerPrefs.HasKey("layout:" + _movieKey);
+            Layout layout;
+            Projection proj;
+            bool swap;
+            if (lockChoice)
+            {
+                layout = guessedLayout;
+                proj = guessedProjection;
+                swap = eyeSwap;
+            }
+            else if (PlayerPrefs.HasKey("layout:" + _movieKey))
+            {
+                layout = (Layout)PlayerPrefs.GetInt("layout:" + _movieKey, (int)guessedLayout);
+                proj = (Projection)PlayerPrefs.GetInt("proj:" + _movieKey, (int)guessedProjection);
+                swap = PlayerPrefs.GetInt("swap:" + _movieKey, eyeSwap ? 1 : 0) == 1;
+            }
+            else
+            {
+                layout = guessedLayout;
+                proj = guessedProjection;
+                swap = eyeSwap;
+            }
             Screen.Apply(layout, proj, swap);
+            StereoDetect.Log(new StereoGuess
+            {
+                Layout = layout,
+                Projection = proj,
+                EyeSwap = swap,
+                Source = _userPicked ? "user" : "filename"
+            });
             ApplyEnvironment();
             Player?.SetVolume(_volume);
             if (Player != null)
@@ -99,6 +128,8 @@ namespace MoviePlayer.App
                 Player.OnAudioChoicesChanged += RebuildLanguages;
                 Player.OnPrepareProgress -= OnPrepare;
                 Player.OnPrepareProgress += OnPrepare;
+                Player.OnProbed -= OnProbed;
+                Player.OnProbed += OnProbed;
             }
             RefreshAudioLabel();
             RebuildLanguages();
@@ -129,7 +160,19 @@ namespace MoviePlayer.App
                 Player.OnAudioTracksReady -= RefreshAudioLabel;
                 Player.OnAudioChoicesChanged -= RebuildLanguages;
                 Player.OnPrepareProgress -= OnPrepare;
+                Player.OnProbed -= OnProbed;
             }
+        }
+
+        void OnProbed(OnDeviceTranscoder.ProbeResult probe)
+        {
+            if (_userPicked || Screen == null || probe == null) return;
+            var guess = StereoDetect.Resolve(_moviePath, null, probe);
+            if (guess.Layout == Screen.Layout && guess.Projection == Screen.Projection && guess.EyeSwap == Screen.EyeSwap)
+                return;
+            Screen.Apply(guess.Layout, guess.Projection, guess.EyeSwap);
+            StereoDetect.Log(guess);
+            RefreshAll();
         }
 
         private void Update()
@@ -427,7 +470,10 @@ namespace MoviePlayer.App
 
             Row(t, "", r =>
             {
-                MakeButton(r, "Recenter view", ButtonColor, () => Recenter?.Recenter(), 260f);
+                var recenter = MakeButton(r, "Hold to recenter", ButtonColor, () => { }, 320f);
+                var hold = recenter.transform.parent.gameObject.AddComponent<HoldToRecenter>();
+                hold.Target = Recenter;
+                recenter.transform.parent.GetComponent<Button>().onClick.RemoveAllListeners();
                 MakeButton(r, "Close", Accent, ToggleSettings, 200f);
             });
         }
@@ -449,6 +495,7 @@ namespace MoviePlayer.App
 
         private void SetMode(Layout layout, Projection proj)
         {
+            _userPicked = true;
             Screen.Apply(layout, proj, Screen.EyeSwap);
             ApplyEnvironment();
             PlayerPrefs.SetInt("layout:" + _movieKey, (int)layout);
@@ -459,6 +506,7 @@ namespace MoviePlayer.App
 
         private void SetSwap(bool swap)
         {
+            _userPicked = true;
             Screen.Apply(Screen.Layout, Screen.Projection, swap);
             PlayerPrefs.SetInt("swap:" + _movieKey, swap ? 1 : 0);
             PlayerPrefs.Save();

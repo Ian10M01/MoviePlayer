@@ -33,11 +33,23 @@ namespace MoviePlayer.Player
             public bool Selected;
         }
 
+        public enum Plan
+        {
+            Direct,
+            AudioOnly,
+            Full
+        }
+
         public class ProbeResult
         {
             public string VideoCodec = "";
             public int VideoMap;
+            public int Width;
+            public int Height;
             public double DurationSec;
+            public string StereoTag = "";
+            public string ProjectionTag = "";
+            public bool Spherical;
             public readonly List<Choice> Audio = new List<Choice>();
         }
 
@@ -120,6 +132,26 @@ namespace MoviePlayer.Player
             return url;
         }
 
+        /// <summary>file:// URL with spaces escaped so Android VideoPlayer can open the path.</summary>
+        public static string ToFileUrl(string filesystemPath)
+        {
+            if (string.IsNullOrEmpty(filesystemPath)) return filesystemPath;
+            if (filesystemPath.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+                filesystemPath = ToFilesystemPath(filesystemPath);
+            string path = filesystemPath.Replace('\\', '/');
+#pragma warning disable SYSLIB0013
+            string escaped = Uri.EscapeUriString(path);
+#pragma warning restore SYSLIB0013
+            return "file://" + escaped;
+        }
+
+        public static string EscapeFileUrl(string url)
+        {
+            if (string.IsNullOrEmpty(url) || !url.StartsWith("file:", StringComparison.OrdinalIgnoreCase))
+                return url;
+            return ToFileUrl(url);
+        }
+
         public static int ChooseDefault(List<Choice> audio)
         {
             if (audio == null || audio.Count == 0) return 0;
@@ -197,24 +229,22 @@ namespace MoviePlayer.Player
             Action<string, float> progress,
             Action<string> onPlayable,
             Action<string> onError,
-            Func<bool> cancelled)
+            Func<bool> cancelled,
+            Plan? force = null)
         {
             if (probe == null) { onError?.Invoke("Nothing to play."); yield break; }
-            Choice audio = ordinal >= 0 && ordinal < probe.Audio.Count ? probe.Audio[ordinal] : null;
-            string ext = Path.GetExtension(path).ToLowerInvariant();
-            bool containerDirect = ext == ".mp4" || ext == ".m4v" || ext == ".mov";
-            bool videoHw = IsHwVideo(probe.VideoCodec);
-            bool audioDirect = audio == null || IsDirectAudio(audio.Codec);
-
-            if (videoHw && audioDirect && containerDirect)
+            // Stereo packing (SBS / OU / 180 / 360) is not a reason to convert.
+            Plan plan = force ?? ChoosePlan(path, probe, ordinal);
+            LogPlan(plan, path, probe, ordinal);
+            if (plan == Plan.Direct)
             {
-                progress?.Invoke("Preparing audio…", 1f);
+                // A cached transcode from an older build is ignored. Play the original.
                 onPlayable?.Invoke(path);
                 yield break;
             }
 
-            bool full = !videoHw;
-            string label = full ? "Converting…" : "Preparing audio…";
+            bool full = plan == Plan.Full;
+            string label = full ? "Converting…" : "Converting audio…";
             long mtime = 0;
             try { mtime = File.GetLastWriteTimeUtc(path).Ticks; } catch { mtime = 0; }
             string key = Hash(path + "|" + mtime + "|" + ordinal + "|" + (full ? "v" : "a"));
@@ -229,38 +259,9 @@ namespace MoviePlayer.Player
             }
 
             string part = dest + "." + Guid.NewGuid().ToString("N") + ".part";
-            bool surround = audio != null && audio.Channels > 2;
             bool ok = false;
             string err = null;
-            if (surround)
-            {
-                yield return Encode(path, probe.VideoMap, ordinal, part, full, 6, probe.DurationSec, label, progress, cancelled, success => ok = success, e => err = e);
-                if (cancelled()) yield break;
-            }
-            if (!ok)
-            {
-                if (File.Exists(part)) try { File.Delete(part); } catch { /* retry clean */ }
-                yield return Encode(path, probe.VideoMap, ordinal, part, full, 2, probe.DurationSec, label, progress, cancelled, success => ok = success, e => err = e);
-            }
-            if (cancelled()) yield break;
-            if ((!ok || !File.Exists(part) || new FileInfo(part).Length < 4096) && !full)
-            {
-                if (File.Exists(part)) try { File.Delete(part); } catch { /* leftover */ }
-                full = true;
-                label = "Converting…";
-                key = Hash(path + "|" + mtime + "|" + ordinal + "|v");
-                dest = Path.Combine(dir, key + ".mp4");
-                if (File.Exists(dest) && new FileInfo(dest).Length > 4096)
-                {
-                    progress?.Invoke(label, 1f);
-                    onPlayable?.Invoke(dest);
-                    yield break;
-                }
-                part = dest + "." + Guid.NewGuid().ToString("N") + ".part";
-                ok = false;
-                err = null;
-                yield return Encode(path, probe.VideoMap, ordinal, part, true, 2, probe.DurationSec, label, progress, cancelled, success => ok = success, e => err = e);
-            }
+            yield return Encode(path, probe.VideoMap, ordinal, part, full, probe.DurationSec, label, progress, cancelled, success => ok = success, e => err = e);
             if (cancelled()) yield break;
             if (!ok || !File.Exists(part) || new FileInfo(part).Length < 4096)
             {
@@ -274,8 +275,46 @@ namespace MoviePlayer.Player
             onPlayable?.Invoke(dest);
         }
 
+        public static Plan ChoosePlan(string path, ProbeResult probe, int ordinal)
+        {
+            if (probe == null) return Plan.Full;
+            Choice audio = AudioAt(probe, ordinal);
+            bool videoHw = IsHwVideo(probe.VideoCodec);
+            bool audioDirect = audio == null || IsDirectAudio(audio.Codec);
+            string ext = Ext(path);
+            bool safeContainer = ext == ".mp4" || ext == ".m4v" || ext == ".mov" || ext == ".3gp";
+            bool tryLoose = ext == ".mkv" || ext == ".webm";
+            if (videoHw && audioDirect && (safeContainer || tryLoose)) return Plan.Direct;
+            if (videoHw) return Plan.AudioOnly;
+            return Plan.Full;
+        }
+
+        public static void LogPlan(Plan plan, string path, ProbeResult probe, int ordinal)
+        {
+            string video = string.IsNullOrEmpty(probe?.VideoCodec) ? "unknown" : probe.VideoCodec;
+            Choice audio = AudioAt(probe, ordinal);
+            string audioCodec = audio == null ? "none" : (string.IsNullOrEmpty(audio.Codec) ? "unknown" : audio.Codec);
+            string kind = plan == Plan.Direct ? "direct play"
+                : plan == Plan.AudioOnly ? "convert audio only"
+                : "convert video+audio";
+            string container = Ext(path).TrimStart('.');
+            if (container.Length == 0) container = "unknown";
+            Debug.Log($"[compat] {kind} video={video} audio={audioCodec} container={container}");
+        }
+
+        public static Plan FallbackPlan(Plan current, string path, ProbeResult probe)
+        {
+            if (current == Plan.Full) return Plan.Full;
+            if (current == Plan.AudioOnly) return Plan.Full;
+            string codec = probe != null ? probe.VideoCodec : "";
+            if (IsHevc(codec) || !IsHwVideo(codec)) return Plan.Full;
+            string ext = Ext(path);
+            bool safe = ext == ".mp4" || ext == ".m4v" || ext == ".mov" || ext == ".3gp";
+            return safe ? Plan.Full : Plan.AudioOnly;
+        }
+
         static IEnumerator Encode(
-            string path, int videoMap, int ordinal, string part, bool full, int channels, double duration,
+            string path, int videoMap, int ordinal, string part, bool full, double duration,
             string label, Action<string, float> progress, Func<bool> cancelled,
             Action<bool> onOk, Action<string> onError)
         {
@@ -305,8 +344,8 @@ namespace MoviePlayer.Player
                 args.AddRange(new[]
                 {
                     "-c:a", "aac", "-profile:a", "aac_low",
-                    "-b:a", channels > 2 ? "384k" : "192k",
-                    "-ac", channels.ToString(CultureInfo.InvariantCulture),
+                    "-b:a", "192k",
+                    "-ac", "2",
                     "-ar", "48000"
                 });
             }
@@ -379,8 +418,46 @@ namespace MoviePlayer.Player
                 ordinal++;
             }
             Disambiguate(result.Audio);
+            ReadTags(lines, result);
             _ = path;
             return result;
+        }
+
+        static void ReadTags(List<string> lines, ProbeResult result)
+        {
+            foreach (var line in lines)
+            {
+                if (line.IndexOf("Stream #", StringComparison.Ordinal) >= 0 &&
+                    line.IndexOf("Video:", StringComparison.Ordinal) >= 0 &&
+                    result.Width == 0)
+                {
+                    var size = Regex.Match(line, @"\b(\d{3,5})x(\d{3,5})\b");
+                    if (size.Success)
+                    {
+                        result.Width = int.Parse(size.Groups[1].Value, CultureInfo.InvariantCulture);
+                        result.Height = int.Parse(size.Groups[2].Value, CultureInfo.InvariantCulture);
+                    }
+                }
+
+                var tag = Regex.Match(line,
+                    @"(stereo_mode|spherical(?:-video)?|projection(?:-type)?)\s*[:=]\s*(\S+)",
+                    RegexOptions.IgnoreCase);
+                if (!tag.Success) continue;
+                string key = tag.Groups[1].Value.ToLowerInvariant();
+                string value = tag.Groups[2].Value.Trim().Trim('"');
+                if (key.StartsWith("stereo", StringComparison.Ordinal)) result.StereoTag = value;
+                else if (key.StartsWith("spherical", StringComparison.Ordinal))
+                    result.Spherical = value != "0" && !value.Equals("false", StringComparison.OrdinalIgnoreCase);
+                else if (string.IsNullOrEmpty(result.ProjectionTag)) result.ProjectionTag = value;
+            }
+
+            var text = string.Join("\n", lines);
+            var side = Regex.Match(text, @"Stereo 3D:\s*([^\r\n]+)", RegexOptions.IgnoreCase);
+            if (side.Success && string.IsNullOrEmpty(result.StereoTag))
+                result.StereoTag = side.Groups[1].Value.Trim();
+            if (text.IndexOf("equirectangular", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                string.IsNullOrEmpty(result.ProjectionTag))
+                result.ProjectionTag = "equirectangular";
         }
 
         static void Disambiguate(List<Choice> audio)
@@ -430,16 +507,36 @@ namespace MoviePlayer.Player
             return string.Equals(na, nb, StringComparison.OrdinalIgnoreCase);
         }
 
-        static bool IsHwVideo(string codec)
+        public static bool IsHevc(string codec)
         {
-            codec = (codec ?? "").ToLowerInvariant();
-            return codec == "h264" || codec == "avc" || codec == "hevc" || codec == "h265";
+            codec = NormCodec(codec);
+            return codec == "hevc" || codec == "h265" || codec == "hvc1" || codec == "hev1";
         }
 
-        static bool IsDirectAudio(string codec)
+        public static bool IsHwVideo(string codec)
         {
-            codec = (codec ?? "").ToLowerInvariant();
+            codec = NormCodec(codec);
+            return codec == "h264" || codec == "avc" || codec == "avc1" || IsHevc(codec);
+        }
+
+        public static bool IsDirectAudio(string codec)
+        {
+            codec = NormCodec(codec);
             return codec == "aac" || codec == "mp3" || codec == "mp4a";
+        }
+
+        static string NormCodec(string codec) => (codec ?? "").Trim().ToLowerInvariant();
+
+        static Choice AudioAt(ProbeResult probe, int ordinal)
+        {
+            if (probe == null || ordinal < 0 || ordinal >= probe.Audio.Count) return null;
+            return probe.Audio[ordinal];
+        }
+
+        static string Ext(string path)
+        {
+            try { return Path.GetExtension(path ?? "").ToLowerInvariant(); }
+            catch { return ""; }
         }
 
         static string Hash(string text)

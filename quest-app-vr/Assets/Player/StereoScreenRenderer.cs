@@ -100,10 +100,10 @@ namespace MoviePlayer.Player
         /// <summary>Reconfigures screen from a MediaManifest received from the server.</summary>
         public void ApplyManifest(MediaManifest manifest)
         {
-            StereoLayout layout = ParseStereo(manifest.stereo);
-            ProjectionType proj = ParseProjection(manifest.projection);
             if (manifest.width > 0 && manifest.height > 0) SetVideoSize(manifest.width, manifest.height);
-            Apply(layout, proj, manifest.eye_swap);
+            var guess = StereoDetect.FromManifest(manifest);
+            Apply(guess.Layout, guess.Projection, guess.EyeSwap);
+            StereoDetect.Log(guess);
         }
 
         /// <summary>Assign the (processed) video texture to the screen.</summary>
@@ -263,7 +263,7 @@ namespace MoviePlayer.Player
 
                 case StereoLayout.HOU:
                 case StereoLayout.FOU:
-                    // Left = top half (V ∈ [0.5,1]), Right = bottom half
+                    // Top half is the left eye (V ∈ [0.5,1]). Bottom half is the right eye.
                     left  = new Vector4(1f, 0.5f, 0f, 0.5f);
                     right = new Vector4(1f, 0.5f, 0f, 0f);
                     break;
@@ -403,22 +403,6 @@ namespace MoviePlayer.Player
 
         // ─────────────────────────────────────────────────────────────────────
         #region Parsers
-
-        private static StereoLayout ParseStereo(string s) => s?.ToLowerInvariant() switch
-        {
-            "hsbs" => StereoLayout.HSBS,
-            "fsbs" => StereoLayout.FSBS,
-            "hou"  => StereoLayout.HOU,
-            "fou"  => StereoLayout.FOU,
-            _      => StereoLayout.Mono
-        };
-
-        private static ProjectionType ParseProjection(string s) => s?.ToLowerInvariant() switch
-        {
-            "equirect180" => ProjectionType.Equirect180,
-            "equirect360" => ProjectionType.Equirect360,
-            _             => ProjectionType.Flat
-        };
 
         #endregion
     }

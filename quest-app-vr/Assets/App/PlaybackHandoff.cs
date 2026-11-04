@@ -16,13 +16,14 @@ namespace MoviePlayer.App
         public int layout;
         public int projection;
         public int audioTrack;
+        public int eyeSwap;
     }
 
     public static class PlaybackHandoff
     {
         static string FilePath => Path.Combine(Application.persistentDataPath, "playback_handoff.json");
 
-        public static void Write(string url, long timeMs, int layout, int projection, int audioTrack)
+        public static void Write(string url, long timeMs, int layout, int projection, int audioTrack, bool eyeSwap = false)
         {
             var data = new PlaybackHandoffData
             {
@@ -31,6 +32,7 @@ namespace MoviePlayer.App
                 layout = layout,
                 projection = projection,
                 audioTrack = audioTrack,
+                eyeSwap = eyeSwap ? 1 : 0,
             };
             try
             {

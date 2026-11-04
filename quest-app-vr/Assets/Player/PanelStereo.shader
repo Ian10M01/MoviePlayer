@@ -7,6 +7,7 @@ Shader "MoviePlayer/PanelStereo"
         _MainTex ("Video", 2D) = "black" {}
         _Color ("Tint", Color) = (1,1,1,1)
         _Pack ("Pack", Float) = 0
+        _Swap ("Swap", Float) = 0
     }
     SubShader
     {
@@ -27,6 +28,7 @@ Shader "MoviePlayer/PanelStereo"
             sampler2D _MainTex;
             fixed4 _Color;
             float _Pack;
+            float _Swap;
 
             struct appdata
             {
@@ -54,7 +56,12 @@ Shader "MoviePlayer/PanelStereo"
             fixed4 frag(v2f i) : SV_Target
             {
                 float2 uvL, uvR;
-                if (_Pack < 0.5)
+                if (_Pack < 0.0)
+                {
+                    uvL = i.uv;
+                    uvR = i.uv;
+                }
+                else if (_Pack < 0.5)
                 {
                     uvL = float2(i.uv.x * 0.5, i.uv.y);
                     uvR = float2(i.uv.x * 0.5 + 0.5, i.uv.y);
@@ -66,6 +73,12 @@ Shader "MoviePlayer/PanelStereo"
                 }
                 float l = dot(tex2D(_MainTex, uvL).rgb, float3(0.299, 0.587, 0.114));
                 float r = dot(tex2D(_MainTex, uvR).rgb, float3(0.299, 0.587, 0.114));
+                if (_Swap > 0.5)
+                {
+                    float tmp = l;
+                    l = r;
+                    r = tmp;
+                }
                 return fixed4(l, r, r, 1) * i.color;
             }
             ENDCG
