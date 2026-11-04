@@ -20,8 +20,9 @@ namespace MoviePlayer.Player
     /// </summary>
     public static class OnDeviceTranscoder
     {
-        public const string BundledRelative = "ffmpeg/arm64-v8a/ffmpeg";
-        const long BundledBytes = 28118768;
+        /// <summary>The static ffmpeg executable, packaged as a "native library" so Android lets it run.</summary>
+        public const string NativeLibName = "libffmpeg.so";
+        public const string DamagedPrefix = "Can't play: ";
 
         public class Choice
         {
@@ -177,28 +178,25 @@ namespace MoviePlayer.Player
         public static IEnumerator EnsureBinary(Action<string> onError)
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
-            string stored = Path.Combine(Application.persistentDataPath, "bin", "ffmpeg");
-            Directory.CreateDirectory(Path.GetDirectoryName(stored));
-            if (!File.Exists(stored) || new FileInfo(stored).Length != BundledBytes)
+            // Android 10+ (targetSdk >= 29) refuses to exec anything the app wrote to its own
+            // storage (error=13). ffmpeg therefore ships as lib/arm64-v8a/libffmpeg.so; with
+            // extractNativeLibs=true the installer unpacks it to nativeLibraryDir, which apps
+            // may execute from.
+            ExecutablePath = null;
+            try
             {
-                string src = Application.streamingAssetsPath + "/" + BundledRelative;
-                using (var req = UnityWebRequest.Get(src))
-                {
-                    yield return req.SendWebRequest();
-                    if (req.result != UnityWebRequest.Result.Success || req.downloadHandler.data == null)
-                    {
-                        onError?.Invoke("Could not unpack ffmpeg: " + req.error);
-                        yield break;
-                    }
-                    File.WriteAllBytes(stored, req.downloadHandler.data);
-                }
+                using var player = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
+                using var activity = player.GetStatic<AndroidJavaObject>("currentActivity");
+                using var info = activity.Call<AndroidJavaObject>("getApplicationInfo");
+                string libDir = info.Get<string>("nativeLibraryDir");
+                string candidate = Path.Combine(libDir, NativeLibName);
+                if (File.Exists(candidate)) ExecutablePath = candidate;
+                else Debug.LogError("[ffmpeg] " + candidate + " missing; check the APK has lib/arm64-v8a/" + NativeLibName);
             }
-            MakeExecutable(stored);
-            string exec = CopyToExecutableDir(stored);
-            MakeExecutable(exec);
-            ExecutablePath = exec;
-            if (string.IsNullOrEmpty(ExecutablePath) || !File.Exists(ExecutablePath))
-                onError?.Invoke("ffmpeg did not extract.");
+            catch (Exception e) { Debug.LogError("[ffmpeg] nativeLibraryDir lookup failed: " + e.Message); }
+            if (string.IsNullOrEmpty(ExecutablePath))
+                onError?.Invoke("ffmpeg is not installed with the app.");
+            yield break;
 #else
             onError?.Invoke("On-device ffmpeg runs on the Quest.");
             yield break;
@@ -212,10 +210,14 @@ namespace MoviePlayer.Player
             var lines = new List<string>();
             int code = -1;
             yield return Run(new[] { ExecutablePath, "-hide_banner", "-i", path }, lines.Add, c => code = c, () => false);
+            Debug.Log($"[ffmpeg] probe exit={code} lines={lines.Count} first={(lines.Count > 0 ? lines[0] : "-")}");
             var result = ParseProbe(path, lines);
             if (string.IsNullOrEmpty(result.VideoCodec) && result.Audio.Count == 0)
             {
-                onError?.Invoke("Could not read streams in " + Path.GetFileName(path));
+                bool damaged = lines.Exists(l => l.Contains("moov atom not found") || l.Contains("Invalid data found"));
+                onError?.Invoke(damaged
+                    ? DamagedPrefix + Path.GetFileName(path) + " is incomplete or damaged. Download it again."
+                    : "Could not read streams in " + Path.GetFileName(path));
                 yield break;
             }
             _ = code; // ffmpeg exits 1 when used only to probe

@@ -114,6 +114,13 @@ namespace MoviePlayer.App
             string saved = PlayerPrefs.GetString("MediaUrl", "");
             if (_urlField != null) _urlField.text = saved;
             StartCoroutine(ScanLocal());
+            string testPlay = ModeRouter.IntentExtra("mp_play");
+            if (!string.IsNullOrEmpty(testPlay))
+            {
+                // Test hook: adb shell am start -n com.movieplayer.vrcinema/com.unity3d.player.UnityPlayerActivity --es mp_play /sdcard/Movies/x.mp4
+                Debug.Log("[Panel] mp_play extra → " + testPlay);
+                PlayUrl(OnDeviceTranscoder.ToFileUrl(testPlay), Path.GetFileName(testPlay));
+            }
         }
 
         void OnEnable()
@@ -280,6 +287,12 @@ namespace MoviePlayer.App
 
         void Update()
         {
+            // Android back maps to Escape. Only act when the library is hidden,
+            // so Escape while browsing the list does nothing.
+            if (_built && _listRoot != null && !_listRoot.activeSelf
+                && UnityEngine.InputSystem.Keyboard.current != null
+                && UnityEngine.InputSystem.Keyboard.current.escapeKey.wasPressedThisFrame)
+                BackToLibrary();
             if (!_built || _player == null || _seeking) return;
             long pos = _player.GetPositionMs();
             long dur = _player.GetDurationMs();
@@ -319,9 +332,30 @@ namespace MoviePlayer.App
             SetStatus("");
         }
 
+        void BackToLibrary()
+        {
+            if (_player != null)
+            {
+                _player.CancelPrepare();
+                _player.Stop();
+            }
+            _url = "";
+            if (_video != null) _video.color = new Color(1f, 1f, 1f, 0f);
+            if (_listContent != null && _listContent.childCount > 0)
+            {
+                ShowList(true);
+                SetStatus("Choose a video");
+            }
+            else
+            {
+                StartCoroutine(ScanLocal());
+            }
+        }
+
         void OnVideoError(string message)
         {
-            SetStatus(string.IsNullOrEmpty(message) ? "Playback error" : message);
+            SetStatus((string.IsNullOrEmpty(message) ? "Playback error" : message)
+                + "  —  press Library to pick another movie");
             if (_status != null) _status.color = Warn;
         }
 
@@ -1065,7 +1099,7 @@ namespace MoviePlayer.App
             Place(title.rectTransform, new Vector2(0f, 0f), new Vector2(0f, 1f), new Vector2(24f, 8f), new Vector2(560f, -8f));
             _urlField = MakeField(top, "https://packager…  or a video URL");
             MakeButton(top, "Open", new Vector2(-250f, 0f), new Vector2(220f, 72f), OnOpenClicked, false);
-            MakeButton(top, "Choose video", new Vector2(-16f, 0f), new Vector2(220f, 72f), () => StartCoroutine(ScanLocal()), true);
+            MakeButton(top, "Library", new Vector2(-16f, 0f), new Vector2(220f, 72f), BackToLibrary, true);
 
             var bottom = Band(root, "Bottom", 0f, 0f, 1f, 0f, Vector2.zero, new Vector2(0f, 430f));
             bottom.GetComponent<Image>().color = Bar;
@@ -1259,7 +1293,7 @@ namespace MoviePlayer.App
             rt.anchoredPosition = pos;
             rt.sizeDelta = size;
             var image = go.GetComponent<Image>();
-            image.color = (label == "VR theater" || label == "Choose video" || label == "Open")
+            image.color = (label == "VR theater" || label == "Library" || label == "Open")
                 ? Accent
                 : new Color(0.22f, 0.25f, 0.32f, 1f);
             go.GetComponent<Button>().onClick.AddListener(() => onClick());

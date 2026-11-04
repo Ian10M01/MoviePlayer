@@ -48,7 +48,11 @@ public static class BuildScript
             },
             locationPathName = out2,
             target           = BuildTarget.Android,
-            options          = BuildOptions.None
+            // Development build = android:debuggable, so `adb shell run-as` can read app
+            // storage and logs show full stack traces. Set MP_RELEASE=1 for a release APK.
+            options          = Environment.GetEnvironmentVariable("MP_RELEASE") == "1"
+                ? BuildOptions.None
+                : BuildOptions.Development
         };
 
         Debug.Log($"=== Building APK → {out2} ===");

@@ -121,7 +121,7 @@ namespace MoviePlayer.App
             _controls.Clarity   = ClarityStack;
             _controls.Theater   = Theater;
             _controls.Recenter  = recenter;
-            _controls.OnLibrary = OnBackToLibrary;
+            _controls.OnLibrary = ReturnToLibrary;
             var cardImage = LibraryPanel != null ? LibraryPanel.GetComponent<Image>() : null;
             _controls.RoundedSprite = cardImage != null ? cardImage.sprite : null;
             if (LibraryPanel != null) _controls.Build(LibraryPanel.transform.parent);
@@ -322,12 +322,29 @@ namespace MoviePlayer.App
             catch (Exception e) { Debug.LogWarning($"[App] Skipping {dir}: {e.Message}"); }
         }
 
-        private void OnBackToLibrary()
+        /// <summary>Stops the current movie and returns to the library so another one can be picked.</summary>
+        public void ReturnToLibrary()
         {
-            PlayerController?.Stop();
-            _controls?.EndMovie();
+            if (PlayerController != null)
+            {
+                // Stop any in-flight prepare first so it cannot fire OnReady and play behind the library.
+                PlayerController.OnReady -= OnPlayerReady;
+                PlayerController.CancelPrepare();
+                PlayerController.Stop();
+            }
+            _seekOnReady = 0;
             _watching = false;
+            _controls?.EndMovie();
             ShowPanel(LibraryPanel);
+            RepopulateLibraryIfEmpty();
+        }
+
+        // Movies started from a handoff or DirectPlayUrl skip the library fetch, so the grid can be empty.
+        private void RepopulateLibraryIfEmpty()
+        {
+            if (LibraryGrid == null || LibraryGrid.childCount > 0) return;
+            if (string.IsNullOrEmpty(_homeNodeUrl)) StartCoroutine(ShowLocalLibrary());
+            else StartCoroutine(FetchLibrary());
         }
 
         // A friend (the host) started a movie: play our own copy of the same file.

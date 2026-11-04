@@ -11,6 +11,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.EventSystems;
+using UnityEngine.InputSystem; // InputActionSetupExtensions.AddBinding
 using UnityEngine.UI;
 using TMPro;
 using MoviePlayer.Player;
@@ -54,6 +55,7 @@ namespace MoviePlayer.App
         private string     _movieKey = "";
         private string     _moviePath = "";
         private bool       _userPicked;
+        private bool       _inMovie;   // true between BeginMovie and EndMovie
 
         bool _preparing;
         string _prepareText = "";
@@ -135,15 +137,22 @@ namespace MoviePlayer.App
             RebuildLanguages();
 
             _paused = false;
+            _inMovie = true;
+            _hiddenWhilePlaying = false;
             if (_playPauseLabel != null) _playPauseLabel.text = "Pause";
             _settings.SetActive(false);
             SetVisible(true);
             RefreshAll();
         }
 
+        /// <summary>Leaves movie mode: hides the bar, language strip and settings so the library is clickable.</summary>
         public void EndMovie()
         {
-            _settings.SetActive(false);
+            _inMovie = false;
+            _hiddenWhilePlaying = false;
+            _preparing = false;
+            _prepareText = "";
+            if (_settings != null) _settings.SetActive(false);
             SetVisible(false);
         }
 
@@ -154,6 +163,7 @@ namespace MoviePlayer.App
 
         private void OnDestroy()
         {
+            _backAction?.Dispose();
             GazeClick.TriggerPressed -= OnAnyTrigger;
             if (Player != null)
             {
@@ -175,8 +185,27 @@ namespace MoviePlayer.App
             RefreshAll();
         }
 
+        private UnityEngine.InputSystem.InputAction _backAction;
+
         private void Update()
         {
+            // Escape (Android back), Quest B or Y leave the movie. Checked before the visibility gate
+            // so it works while the bar is auto-hidden.
+            // The project uses the Input System only; legacy UnityEngine.Input would throw.
+            if (_backAction == null)
+            {
+                _backAction = new UnityEngine.InputSystem.InputAction("BackToLibrary", UnityEngine.InputSystem.InputActionType.Button);
+                _backAction.AddBinding("<Keyboard>/escape");
+                _backAction.AddBinding("<XRController>{RightHand}/secondaryButton"); // B
+                _backAction.AddBinding("<XRController>{LeftHand}/secondaryButton");  // Y
+                _backAction.Enable();
+            }
+            if (_inMovie && _backAction.WasPressedThisFrame())
+            {
+                OnLibrary?.Invoke();
+                return;
+            }
+
             if (!_visible || Player == null) return;
 
             if (_preparing)
@@ -204,7 +233,7 @@ namespace MoviePlayer.App
 
         private void OnAnyTrigger()
         {
-            if (_hiddenWhilePlaying) SetVisible(true);
+            if (_inMovie && _hiddenWhilePlaying) SetVisible(true);
         }
 
         private void SetVisible(bool show, bool keepActive = false)

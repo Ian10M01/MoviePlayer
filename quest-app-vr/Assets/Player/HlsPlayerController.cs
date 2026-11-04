@@ -162,14 +162,37 @@ namespace MoviePlayer.Player
             string path = OnDeviceTranscoder.ToFilesystemPath(url);
             _filesystemPath = path;
             string error = null;
+            Debug.Log("[compat] step 1/3 unpack ffmpeg for " + path);
+            float t0 = Time.realtimeSinceStartup;
             yield return OnDeviceTranscoder.EnsureBinary(e => error = e);
-            if (generation != _prepareGen) yield break;
-            if (!string.IsNullOrEmpty(error)) { OnError?.Invoke(error); yield break; }
+            Debug.Log($"[compat] step 1/3 done in {Time.realtimeSinceStartup - t0:F1}s exe={OnDeviceTranscoder.ExecutablePath} error={error ?? "none"}");
+            if (generation != _prepareGen) { Debug.Log("[compat] cancelled after unpack"); yield break; }
+            if (!string.IsNullOrEmpty(error))
+            {
+                // Without ffmpeg, still try Android's own decoder: H.264/HEVC + AAC files play fine.
+                Debug.LogWarning("[compat] " + error + " Playing the file directly.");
+                InitVideoPlayer(OnDeviceTranscoder.ToFileUrl(path));
+                yield break;
+            }
 
             OnDeviceTranscoder.ProbeResult probe = null;
+            Debug.Log("[compat] step 2/3 probe");
+            t0 = Time.realtimeSinceStartup;
             yield return OnDeviceTranscoder.Probe(path, r => probe = r, e => error = e);
-            if (generation != _prepareGen) yield break;
-            if (probe == null) { OnError?.Invoke(error ?? "Could not read the file."); yield break; }
+            Debug.Log($"[compat] step 2/3 done in {Time.realtimeSinceStartup - t0:F1}s video={probe?.VideoCodec ?? "-"} audio={probe?.Audio.Count ?? -1} error={error ?? "none"}");
+            if (generation != _prepareGen) { Debug.Log("[compat] cancelled after probe"); yield break; }
+            if (probe == null && error != null && error.StartsWith(OnDeviceTranscoder.DamagedPrefix))
+            {
+                Debug.LogError("[compat] " + error);
+                OnError?.Invoke(error);
+                yield break;
+            }
+            if (probe == null)
+            {
+                Debug.LogWarning("[compat] probe failed (" + error + "). Playing the file directly.");
+                InitVideoPlayer(OnDeviceTranscoder.ToFileUrl(path));
+                yield break;
+            }
             _probe = probe;
             OnProbed?.Invoke(probe);
 
@@ -193,6 +216,7 @@ namespace MoviePlayer.Player
             OnAudioChoicesChanged?.Invoke();
 
             string playable = null;
+            Debug.Log("[compat] step 3/3 prepare playback");
             yield return OnDeviceTranscoder.PreparePlayback(
                 path, probe, probe.Audio.Count > 0 ? ordinal : -1,
                 (msg, p) => { if (generation == _prepareGen) OnPrepareProgress?.Invoke(msg, p); },
@@ -413,7 +437,9 @@ namespace MoviePlayer.Player
 
         void InitVideoPlayer(string url)
         {
-            url = OnDeviceTranscoder.EscapeFileUrl(url);
+            // Unity's Android VideoPlayer does not percent-decode file:// URLs ("could not
+            // translate file:///…%20… to local file"), so hand it the plain absolute path.
+            if (OnDeviceTranscoder.IsLocalFile(url)) url = OnDeviceTranscoder.ToFilesystemPath(url);
             if (_prepareWatch != null) { StopCoroutine(_prepareWatch); _prepareWatch = null; }
 
             // Clean up previous instance

@@ -99,6 +99,27 @@ namespace MoviePlayer.App
             return false;
 #endif
         }
+
+        /// <summary>String extra on the launching intent, or null.</summary>
+        public static string IntentExtra(string key)
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using var player = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
+                using var activity = player.GetStatic<AndroidJavaObject>("currentActivity");
+                using var intent = activity?.Call<AndroidJavaObject>("getIntent");
+                return intent?.Call<string>("getStringExtra", key);
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[Mode] Intent extra read failed: " + e.Message);
+                return null;
+            }
+#else
+            return null;
+#endif
+        }
     }
 
     public static class XRSession
