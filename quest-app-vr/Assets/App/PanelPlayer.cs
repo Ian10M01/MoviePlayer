@@ -6,6 +6,7 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.InputSystem.EnhancedTouch;
 using UnityEngine.Networking;
+using UnityEngine.Rendering.Universal;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 using MoviePlayer.Player;
@@ -66,8 +67,14 @@ namespace MoviePlayer.App
             _font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf");
             var shader = Shader.Find("MoviePlayer/PanelStereo");
             if (shader != null) _anaglyph = new Material(shader) { name = "PanelAnaglyph" };
+            EnsureFlatCamera();
             BuildUi();
             _built = true;
+            if (!ModeRouter.IsTheaterActivity())
+            {
+                Debug.Log("[App] Panel visible");
+                StartCoroutine(PresentPanel());
+            }
             string saved = PlayerPrefs.GetString("MediaUrl", "");
             if (_urlField != null) _urlField.text = saved;
             StartCoroutine(ScanLocal());
@@ -412,13 +419,120 @@ namespace MoviePlayer.App
                 : $"{t.Minutes}:{t.Seconds:00}";
         }
 
+        static void EnsureFlatCamera()
+        {
+            var cam = Camera.main;
+            if (cam == null)
+            {
+                var go = new GameObject("Main Camera");
+                go.tag = "MainCamera";
+                cam = go.AddComponent<Camera>();
+                go.AddComponent<AudioListener>();
+            }
+            cam.enabled = true;
+            cam.targetTexture = null;
+            cam.targetDisplay = 0;
+            cam.clearFlags = CameraClearFlags.SolidColor;
+            cam.backgroundColor = new Color(0.12f, 0.22f, 0.45f, 1f);
+            cam.orthographic = true;
+            cam.orthographicSize = 5f;
+            cam.nearClipPlane = 0.1f;
+            cam.farClipPlane = 50f;
+            var data = cam.GetUniversalAdditionalCameraData();
+            data.renderType = CameraRenderType.Base;
+            data.allowXRRendering = false;
+        }
+
+        IEnumerator PresentPanel()
+        {
+            // Horizon composites the SurfaceView. Until that view has a buffer the panel is black,
+            // even though the camera already has a 1280x800 target.
+            NudgeAndroidSurface();
+            yield return new WaitForEndOfFrame();
+            var cam = Camera.main;
+            Debug.Log("[App] Panel frame " + (cam != null ? cam.pixelWidth + "x" + cam.pixelHeight : "none"));
+        }
+
+        static void NudgeAndroidSurface()
+        {
+#if UNITY_ANDROID && !UNITY_EDITOR
+            try
+            {
+                using var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
+                using var activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
+                activity.Call("runOnUiThread", new AndroidJavaRunnable(ApplySurfaceLayout));
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[App] Surface nudge failed: " + e.Message);
+            }
+#endif
+        }
+
+        static void ShowAndroidTitle(AndroidJavaObject activity)
+        {
+            const int ContentId = 16908290;
+            using var content = activity.Call<AndroidJavaObject>("findViewById", ContentId);
+            if (content == null) return;
+            using var label = new AndroidJavaObject("android.widget.TextView", activity);
+            label.Call("setText", "MoviePlayer");
+            label.Call("setTextSize", 28f);
+            label.Call("setTextColor", -1);
+            label.Call("setGravity", 17);
+            label.Call("setBackgroundColor", unchecked((int)0xFF1F3866));
+            using var lp = new AndroidJavaObject("android.widget.FrameLayout$LayoutParams", -1, 140);
+            lp.Set("gravity", 48);
+            content.Call("addView", label, lp);
+        }
+
+        static void ApplySurfaceLayout()
+        {
+            try
+            {
+                using var unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
+                using var activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
+                using var window = activity.Call<AndroidJavaObject>("getWindow");
+                using var decor = window.Call<AndroidJavaObject>("getDecorView");
+                int width = decor.Call<int>("getWidth");
+                int height = decor.Call<int>("getHeight");
+                if (width < 16) width = 1280;
+                if (height < 16) height = 800;
+
+                using var resources = activity.Call<AndroidJavaObject>("getResources");
+                string packageName = activity.Call<string>("getPackageName");
+                int viewId = resources.Call<int>("getIdentifier", "unitySurfaceView", "id", packageName);
+                using var surface = viewId != 0 ? activity.Call<AndroidJavaObject>("findViewById", viewId) : null;
+                if (surface == null)
+                {
+                    Debug.LogWarning("[App] unitySurfaceView id=" + viewId + " not in the hierarchy");
+                    return;
+                }
+
+                string type = surface.Call<AndroidJavaObject>("getClass").Call<string>("getName");
+                surface.Call("setVisibility", 0);
+                surface.Call("setBackgroundColor", 0);
+                ShowAndroidTitle(activity);
+                using var holder = surface.Call<AndroidJavaObject>("getHolder");
+                holder.Call("setFormat", -1);
+                holder.Call("setFixedSize", width, height);
+                Debug.Log("[App] SurfaceView " + type + " " + surface.Call<int>("getWidth") + "x" + surface.Call<int>("getHeight"));
+            }
+            catch (Exception e)
+            {
+                Debug.LogWarning("[App] Surface layout: " + e.Message);
+            }
+        }
+
         // ─── uGUI ────────────────────────────────────────────────────────────
 
         void BuildUi()
         {
             var canvasGo = new GameObject("PanelCanvas", typeof(RectTransform), typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
             var canvas = canvasGo.GetComponent<Canvas>();
-            canvas.renderMode = RenderMode.ScreenSpaceOverlay;
+            var cam = Camera.main;
+            canvas.renderMode = cam != null ? RenderMode.ScreenSpaceCamera : RenderMode.ScreenSpaceOverlay;
+            canvas.worldCamera = cam;
+            canvas.planeDistance = 10f;
             canvas.sortingOrder = 0;
             var scaler = canvasGo.GetComponent<CanvasScaler>();
             scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
@@ -437,11 +551,14 @@ namespace MoviePlayer.App
             var bg = new GameObject("Background", typeof(RectTransform), typeof(Image));
             bg.transform.SetParent(root, false);
             Stretch((RectTransform)bg.transform);
-            bg.GetComponent<Image>().color = new Color(0.04f, 0.045f, 0.05f, 1f);
+            bg.GetComponent<Image>().color = new Color(0.12f, 0.22f, 0.45f, 1f);
             bg.GetComponent<Image>().raycastTarget = false;
 
             var top = Band(root, "Top", 0f, 1f, 1f, 1f, new Vector2(0f, -96f), Vector2.zero);
             top.GetComponent<Image>().color = Bar;
+            var title = MakeText(top, "MoviePlayer", 36, TextAnchor.MiddleLeft, false);
+            title.fontStyle = FontStyle.Bold;
+            Place(title.rectTransform, new Vector2(0f, 0f), new Vector2(0f, 1f), new Vector2(24f, 8f), new Vector2(300f, -8f));
             _urlField = MakeField(top, "https://packager…  or a video URL");
             MakeButton(top, "Open", new Vector2(-250f, 0f), new Vector2(220f, 72f), OnOpenClicked, false);
             MakeButton(top, "On this Quest", new Vector2(-16f, 0f), new Vector2(220f, 72f), () => StartCoroutine(ScanLocal()), true);
@@ -596,7 +713,7 @@ namespace MoviePlayer.App
             var rt = (RectTransform)go.transform;
             rt.anchorMin = Vector2.zero;
             rt.anchorMax = Vector2.one;
-            rt.offsetMin = new Vector2(16f, 16f);
+            rt.offsetMin = new Vector2(300f, 16f);
             rt.offsetMax = new Vector2(-490f, -16f);
             go.GetComponent<Image>().color = new Color(1f, 1f, 1f, 0.08f);
             var text = MakeText(go.transform, "", 26, TextAnchor.MiddleLeft, true);

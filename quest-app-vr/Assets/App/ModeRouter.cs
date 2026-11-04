@@ -17,8 +17,46 @@ namespace MoviePlayer.App
         public static bool TheaterSession { get; private set; }
         bool _routing;
 
-        void Awake() => TryRoute();
+        void Awake()
+        {
+            if (IsTheaterActivity())
+                TryRoute();
+            else
+                StartCoroutine(ReleaseImmersiveDisplay());
+        }
+
         void Start() => TryRoute();
+
+        /// <summary>
+        /// The panel process must not keep an OpenXR session. XR plug-in management
+        /// can claim the display before the first scene, which leaves Quest's 2D
+        /// window black. XR starts later, only from the VR theater action.
+        /// </summary>
+        IEnumerator ReleaseImmersiveDisplay()
+        {
+            for (int i = 0; i < 10; i++)
+            {
+                if (IsTheaterActivity())
+                {
+                    TryRoute();
+                    yield break;
+                }
+                StopImmersiveSession();
+                yield return null;
+            }
+        }
+
+        static void StopImmersiveSession()
+        {
+            var manager = XRGeneralSettings.Instance != null ? XRGeneralSettings.Instance.Manager : null;
+            if (manager == null) return;
+            if (!manager.isInitializationComplete && manager.activeLoader == null) return;
+            try { manager.StopSubsystems(); }
+            catch (Exception e) { Debug.LogWarning("[XR] Panel stop failed: " + e.Message); }
+            try { manager.DeinitializeLoader(); }
+            catch (Exception e) { Debug.LogWarning("[XR] Panel deinit failed: " + e.Message); }
+            Debug.Log("[XR] Immersive session stopped on the 2D panel.");
+        }
 
         void TryRoute()
         {

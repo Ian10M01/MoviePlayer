@@ -123,11 +123,14 @@ public static class SceneBuilder
         camGO.tag = "MainCamera";
         var cam = camGO.AddComponent<Camera>();
         cam.clearFlags = CameraClearFlags.SolidColor;
-        cam.backgroundColor = new Color(0.04f, 0.045f, 0.05f, 1f);
+        cam.backgroundColor = new Color(0.12f, 0.22f, 0.45f, 1f);
         cam.orthographic = true;
         cam.nearClipPlane = 0.1f;
         cam.farClipPlane = 50f;
         camGO.AddComponent<AudioListener>();
+        var urp = camGO.AddComponent<UnityEngine.Rendering.Universal.UniversalAdditionalCameraData>();
+        urp.renderType = UnityEngine.Rendering.Universal.CameraRenderType.Base;
+        urp.allowXRRendering = false;
 
         var app = new GameObject("PanelApp");
         app.AddComponent<HlsPlayerController>();

@@ -37,6 +37,7 @@ public static class XRSetup
     {
         "Universal Render Pipeline/Unlit",
         "Universal Render Pipeline/Lit",
+        "UI/Default",
         "Sprites/Default",
         "Hidden/MoviePlayer/VideoEnhance",
         "MoviePlayer/PanelStereo",
@@ -314,9 +315,10 @@ public static class XRSetup
         // Orientation
         PlayerSettings.defaultInterfaceOrientation = UIOrientation.LandscapeLeft;
 
-        // Fullscreen / splash
         // Fullscreen would fight Horizon's resizable 2D panel. The theater activity is immersive on its own.
+        // Never draws past the SurfaceView Horizon composites, so the 2D window stays black.
         try { PlayerSettings.Android.startInFullscreen = false; } catch { }
+        try { PlayerSettings.Android.blitType = AndroidBlitType.Always; } catch { }
         try { PlayerSettings.SplashScreen.show = false;         } catch { }
 
         Debug.Log("[XRSetup] Player settings applied.");
@@ -347,10 +349,11 @@ public static class XRSetup
     <uses-permission android:name=""android.permission.READ_MEDIA_VIDEO"" />
     <uses-permission android:name=""android.permission.READ_EXTERNAL_STORAGE"" android:maxSdkVersion=""32"" />
 
-    <!-- Optional so the app can launch as a 2D multitask window. The theater activity still enters VR. -->
+    <!-- Optional so the library launches the 2D panel. The theater activity still enters VR. -->
     <uses-feature android:name=""android.hardware.vr.headtracking""
                   android:required=""false""
-                  android:version=""1"" />
+                  android:version=""1""
+                  tools:replace=""android:required"" />
 
     <application
         android:allowBackup=""false""
@@ -364,7 +367,8 @@ public static class XRSetup
             android:resizeableActivity=""true""
             android:screenOrientation=""userLandscape""
             android:configChanges=""density|fontScale|keyboard|keyboardHidden|layoutDirection|locale|mcc|mnc|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode""
-            android:hardwareAccelerated=""true""
+            android:hardwareAccelerated=""false""
+            tools:replace=""android:hardwareAccelerated""
             android:exported=""true"">
 
             <intent-filter>
@@ -374,6 +378,8 @@ public static class XRSetup
             </intent-filter>
 
             <meta-data android:name=""unityplayer.UnityActivity"" android:value=""true"" />
+            <meta-data android:name=""com.oculus.vr.focusaware"" tools:node=""remove"" />
+            <property android:name=""android.window.PROPERTY_XR_ACTIVITY_START_MODE"" tools:node=""remove"" />
         </activity>
 
         <activity
@@ -394,6 +400,9 @@ public static class XRSetup
             </intent-filter>
 
             <meta-data android:name=""unityplayer.UnityActivity"" android:value=""true"" />
+            <meta-data android:name=""com.oculus.vr.focusaware"" android:value=""true"" />
+            <property android:name=""android.window.PROPERTY_XR_ACTIVITY_START_MODE""
+                      android:value=""XR_ACTIVITY_START_MODE_FULL_SPACE_UNMANAGED"" />
         </activity>
 
         <!-- Supported Quest devices (tools:replace overrides the xrmanifest.androidlib default) -->

@@ -480,17 +480,29 @@ namespace MoviePlayer.Player
 #if UNITY_ANDROID && !UNITY_EDITOR
         static void MakeExecutable(string path)
         {
+            // 0755. Os.chmod is the reliable path; File and Runtime.exec are backups.
+            // A string[] passed to Call is covariant with params object[] and becomes
+            // three String arguments, which Unity then invokes as Object.exec.
+            try
+            {
+                using var os = new AndroidJavaClass("android.system.Os");
+                os.CallStatic("chmod", path, 493);
+            }
+            catch (Exception e) { Debug.LogWarning("[ffmpeg] Os.chmod: " + e.Message); }
+
             try
             {
                 using var file = new AndroidJavaObject("java.io.File", path);
                 file.Call<bool>("setExecutable", true, false);
+                file.Call<bool>("setReadable", true, false);
             }
             catch (Exception e) { Debug.LogWarning("[ffmpeg] setExecutable: " + e.Message); }
+
             try
             {
-                using var runtime = new AndroidJavaClass("java.lang.Runtime");
-                using var proc = runtime.CallStatic<AndroidJavaObject>("getRuntime")
-                    .Call<AndroidJavaObject>("exec", new[] { "chmod", "755", path });
+                using var runtimeClass = new AndroidJavaClass("java.lang.Runtime");
+                using var runtime = runtimeClass.CallStatic<AndroidJavaObject>("getRuntime");
+                using var proc = runtime.Call<AndroidJavaObject>("exec", "chmod 755 " + path);
                 proc.Call<int>("waitFor");
             }
             catch (Exception e) { Debug.LogWarning("[ffmpeg] chmod: " + e.Message); }
