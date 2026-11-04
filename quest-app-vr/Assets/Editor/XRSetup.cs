@@ -11,8 +11,10 @@ using UnityEngine.XR.Management;
 using System.Linq;
 using UnityEditor.XR.Management;
 using UnityEditor.XR.Management.Metadata;
+using UnityEngine.Rendering.Universal;
 using UnityEngine.XR.OpenXR;
 using UnityEngine.XR.OpenXR.Features;
+using MoviePlayer.App;
 
 public static class XRSetup
 {
@@ -24,6 +26,7 @@ public static class XRSetup
         ConfigurePlayerSettings();
         WriteAndroidManifest();
         IncludeRuntimeShaders();
+        EnsurePanelBlitFeature();
         AssetDatabase.SaveAssets();
         AssetDatabase.Refresh();
         Debug.Log("[XRSetup] Done.");
@@ -33,12 +36,36 @@ public static class XRSetup
     // Runtime scripts build materials with Shader.Find. A shader no asset references is
     // stripped from the build, and Shader.Find then returns null (pink objects).
 
+    static void EnsurePanelBlitFeature()
+    {
+        const string path = "Assets/Settings/Project Configuration/Android Preset.asset";
+        var data = AssetDatabase.LoadAssetAtPath<UniversalRendererData>(path);
+        if (data == null)
+        {
+            Debug.LogWarning("[XRSetup] Android renderer preset missing");
+            return;
+        }
+        foreach (var existing in data.rendererFeatures)
+        {
+            if (existing is PanelUiFeature) return;
+        }
+        var feature = ScriptableObject.CreateInstance<PanelUiFeature>();
+        feature.name = "PanelUiFeature";
+        AssetDatabase.AddObjectToAsset(feature, data);
+        data.rendererFeatures.Add(feature);
+        data.SetDirty();
+        EditorUtility.SetDirty(data);
+        Debug.Log("[XRSetup] Panel UI blit feature added");
+    }
+
     static readonly string[] RuntimeShaders =
     {
         "Universal Render Pipeline/Unlit",
         "Universal Render Pipeline/Lit",
         "UI/Default",
         "Sprites/Default",
+        "MoviePlayer/FlatUI",
+        "MoviePlayer/PresentUI",
         "Hidden/MoviePlayer/VideoEnhance",
         "MoviePlayer/PanelStereo",
     };

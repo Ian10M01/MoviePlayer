@@ -127,10 +127,14 @@ public static class SceneBuilder
         cam.orthographic = true;
         cam.nearClipPlane = 0.1f;
         cam.farClipPlane = 50f;
+        cam.stereoTargetEye = StereoTargetEyeMask.None;
+        cam.allowMSAA = false;
+        cam.allowHDR = false;
         camGO.AddComponent<AudioListener>();
         var urp = camGO.AddComponent<UnityEngine.Rendering.Universal.UniversalAdditionalCameraData>();
         urp.renderType = UnityEngine.Rendering.Universal.CameraRenderType.Base;
         urp.allowXRRendering = false;
+        urp.renderPostProcessing = false;
 
         var app = new GameObject("PanelApp");
         app.AddComponent<HlsPlayerController>();
